@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 # -----------------------------
 # Page & Globals
 # -----------------------------
-st.set_page_config(page_title="Q-Method (TADT) — Person Q + GitHub", layout="wide")
-st.title("Q-Method (TADT) — 사람 요인화(Q) + GitHub 동기화")
+st.set_page_config(page_title="Q-Method (TADT Research) Analyzer", layout="wide")
+st.title("Q-Method (TADT Research) Analyzer")
 
 DATA_PATH = "responses_tadt.csv"   # 로컬 CSV 경로
 MIN_N_FOR_ANALYSIS = 5
@@ -234,7 +234,7 @@ tab1, tab2, tab3 = st.tabs(["✍️ 설문 수집(이메일 필수)", "📊 사�
 # -----------------------------
 with tab1:
     st.subheader("응답 입력 (이메일 필수)")
-    email = st.text_input("이메일(필수) — 후속 패널 조사/보상 안내용")
+    email = st.text_input("이메일(필수) — 후속 패널 조사/보상 안내용으로, 관련법에 의거 사용목적에 따라 활용후 폐기됩니다.")
     with st.form("likert_form"):
         answers = {}
         for i, stmt in enumerate(Q_SET, start=1):

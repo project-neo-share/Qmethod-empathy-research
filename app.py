@@ -1,7 +1,7 @@
 """
 Q-Method (TADT) Streamlit Application — Safe Init & Required Fields
 
-Author      : Your Team
+Author      : Prof. Dr. Songhee Kang
 Last Update : 2025-08-14
 Description : Likert-based Q-Method survey tool for TADT (Tech-Affective Dynamics Theory)
               - 시나리오(고객센터/의료/교육) '필수' 선택
@@ -12,7 +12,7 @@ Description : Likert-based Q-Method survey tool for TADT (Tech-Affective Dynamic
                    (1) 예측(Predictive) ↔ 공감(Empathy)
                    (2) 위임(Delegation) ↔ 협업(Collaboration)
               - 유형별 운영모델/인사전략/서비스혁신 권고 자동 생성
-              - 빈 파일/파일 없음/파싱에러 대비, 저장/분석 단계 예외 처리
+              - '존재하지만 비어있는 CSV'를 첫 제출로 채우는 안전 처리
 """
 
 import os
@@ -70,6 +70,7 @@ def load_csv_safe(path: str):
         return None
     try:
         if os.path.getsize(path) == 0:
+            # 파일이 존재하지만 비어있음
             return None
         df = pd.read_csv(path)
         if df.empty:
@@ -83,6 +84,7 @@ def load_csv_safe(path: str):
 
 def save_csv_safe(df: pd.DataFrame, path: str):
     try:
+        # 존재/빈 파일 여부와 관계 없이 같은 경로에 저장
         df.to_csv(path, index=False, encoding="utf-8-sig")
         return True
     except Exception as e:
@@ -123,14 +125,13 @@ if st.session_state.authenticated:
         )
         if st.sidebar.button("🧹 CSV 초기화(백지)"):
             try:
-                os.remove(DATA_PATH)
-                st.sidebar.success("CSV 삭제 완료 (최초 응답 시 자동 생성됩니다).")
-            except FileNotFoundError:
-                st.sidebar.info("이미 파일이 없습니다.")
+                # 파일은 유지하고, 내용을 0바이트로 비우려면 아래와 같이:
+                open(DATA_PATH, "w", encoding="utf-8").close()
+                st.sidebar.success("CSV를 비웠습니다(파일은 유지). 첫 제출 시 다시 채워집니다.")
             except Exception as e:
-                st.sidebar.error(f"삭제 실패: {e}")
+                st.sidebar.error(f"초기화 실패: {e}")
     else:
-        st.sidebar.info("저장된 응답이 없습니다. 첫 제출 시 파일이 자동 생성됩니다.")
+        st.sidebar.info("저장된 응답이 없습니다. 첫 제출 시 파일이 채워집니다.")
 
 # -----------------------------
 # Q-set (max 30)
@@ -268,15 +269,24 @@ with tab1:
                     "email": email.strip(),
                     "ts": datetime.datetime.now().isoformat()
                 }
+
+                # 파일 존재/비어있음 상태 확인
+                file_exists = os.path.exists(DATA_PATH)
+                file_empty = file_exists and os.path.getsize(DATA_PATH) == 0
+
                 df_old = load_csv_safe(DATA_PATH)
                 if df_old is None:
+                    # (파일 없음 or 비어있음 or 파싱불가) → 첫 응답으로 채움
                     df_all = pd.DataFrame([row])
                 else:
                     df_old, _ = ensure_q_columns(df_old, q_count=len(Q_SET))
                     df_all = pd.concat([df_old, pd.DataFrame([row])], ignore_index=True)
 
                 if save_csv_safe(df_all, DATA_PATH):
-                    st.success("응답이 저장되었습니다. 감사합니다! (최초 실행이라면 파일이 새로 생성되었습니다)")
+                    if file_exists and file_empty:
+                        st.success("응답이 저장되었습니다. (빈 파일에 첫 응답을 기록했습니다)")
+                    else:
+                        st.success("응답이 저장되었습니다. 감사합니다!")
             except Exception as e:
                 st.error(f"응답 저장 중 오류가 발생했습니다: {e}")
 

@@ -1,26 +1,29 @@
 """
-Q-Method (TADT) Streamlit Application
+Q-Method (TADT) Streamlit Application — Safe Init & Required Fields
 
 Author      : Your Team
 Last Update : 2025-08-14
 Description : Likert-based Q-Method survey tool for TADT (Tech-Affective Dynamics Theory)
-              - Optional domain scenarios (고객센터/의료/교육)
-              - Likert (1~5) ratings for up to 30 statements (Q-set)
-              - Factor analysis (with fallback to PCA) to derive types
-              - Mapping types onto two strategy matrices:
-                   (1) 예측 vs 공감
-                   (2) 위임 vs 협업
-              - Auto-generate recommendations for 운영모델 / 인사전략 / 서비스 혁신
+              - 시나리오(고객센터/의료/교육) '필수' 선택
+              - 이메일 '필수' 입력(간단 유효성 검증)
+              - Likert (1~5) Q-set 응답 수집 (최대 30문항)
+              - Factor Analysis(가능하면) 또는 PCA로 유형(Type) 도출
+              - 전략 매트릭스 매핑:
+                   (1) 예측(Predictive) ↔ 공감(Empathy)
+                   (2) 위임(Delegation) ↔ 협업(Collaboration)
+              - 유형별 운영모델/인사전략/서비스혁신 권고 자동 생성
+              - 빈 파일/파일 없음/파싱에러 대비, 저장/분석 단계 예외 처리
 """
 
 import os
+import re
 import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-# Try to import FactorAnalyzer; if not available, fall back to sklearn PCA
+# FactorAnalyzer optional
 _FA_AVAILABLE = True
 try:
     from factor_analyzer import FactorAnalyzer
@@ -32,12 +35,13 @@ except Exception:
 # Page & Globals
 # -----------------------------
 st.set_page_config(page_title="Q-Method (TADT) Analyzer", layout="wide")
-st.title("Q-Method (TADT) Likert Analyzer")
+st.title("Q-Method (TADT) Likert Analyzer — Safe & Required")
 
 DATA_PATH = "responses_tadt.csv"
+MIN_N_FOR_ANALYSIS = 5  # 최소 유효 응답 수
 
 # -----------------------------
-# Helper: Korean font (optional)
+# Korean font (optional)
 # -----------------------------
 try:
     import matplotlib.font_manager as fm
@@ -46,6 +50,52 @@ try:
         plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 except Exception:
     pass
+
+# -----------------------------
+# Utilities
+# -----------------------------
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+def is_valid_email(s: str) -> bool:
+    if not s:
+        return False
+    s = s.strip()
+    if len(s) > 150:
+        return False
+    return bool(EMAIL_RE.match(s))
+
+def load_csv_safe(path: str):
+    """Return DataFrame or None if file not found/empty/parse error."""
+    if not os.path.exists(path):
+        return None
+    try:
+        if os.path.getsize(path) == 0:
+            return None
+        df = pd.read_csv(path)
+        if df.empty:
+            return None
+        return df
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError):
+        return None
+    except Exception as e:
+        st.warning(f"CSV 로드 중 예기치 못한 오류: {e}")
+        return None
+
+def save_csv_safe(df: pd.DataFrame, path: str):
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        return True
+    except Exception as e:
+        st.error(f"CSV 저장 실패: {e}")
+        return False
+
+def ensure_q_columns(df: pd.DataFrame, q_count: int = 30):
+    """Ensure Q01..Q{q_count} columns exist; if missing, create with NaN (for safety in admin view)."""
+    cols = [f"Q{i:02d}" for i in range(1, q_count + 1)]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df, cols
 
 # -----------------------------
 # Sidebar: Admin
@@ -62,14 +112,25 @@ if st.sidebar.button("로그인"):
     else:
         st.sidebar.error("인증 실패")
 
-if st.session_state.authenticated and os.path.exists(DATA_PATH):
-    df_dl = pd.read_csv(DATA_PATH)
-    st.sidebar.download_button(
-        label="📥 응답 데이터 다운로드 (CSV)",
-        data=df_dl.to_csv(index=False).encode("utf-8-sig"),
-        file_name="responses_tadt.csv",
-        mime="text/csv",
-    )
+if st.session_state.authenticated:
+    df_dl = load_csv_safe(DATA_PATH)
+    if df_dl is not None:
+        st.sidebar.download_button(
+            label="📥 응답 데이터 다운로드 (CSV)",
+            data=df_dl.to_csv(index=False).encode("utf-8-sig"),
+            file_name="responses_tadt.csv",
+            mime="text/csv",
+        )
+        if st.sidebar.button("🧹 CSV 초기화(백지)"):
+            try:
+                os.remove(DATA_PATH)
+                st.sidebar.success("CSV 삭제 완료 (최초 응답 시 자동 생성됩니다).")
+            except FileNotFoundError:
+                st.sidebar.info("이미 파일이 없습니다.")
+            except Exception as e:
+                st.sidebar.error(f"삭제 실패: {e}")
+    else:
+        st.sidebar.info("저장된 응답이 없습니다. 첫 제출 시 파일이 자동 생성됩니다.")
 
 # -----------------------------
 # Q-set (max 30)
@@ -115,8 +176,7 @@ Q_SET = [
     "사용자 세분화(도구지향/관계지향)에 따라 톤과 자동화 수준을 차등 제공해야 한다.",                    # Q30
 ]
 
-# Statements tags for dimension mapping (weights: +1 or -1)
-# Axes: Empathy vs Predictive, Delegation vs Collaboration
+# Axis weights for strategy mapping
 AXIS_WEIGHTS = {
     "Empathy": {
         "Q01": +1, "Q02": -1, "Q04": +1,
@@ -127,7 +187,7 @@ AXIS_WEIGHTS = {
     "Predictive": {
         "Q03": +1, "Q09": +1, "Q10": +1, "Q11": +1,
         "Q16": +1, "Q25": +1, "Q27": +1,
-        "Q15": -1  # HIL 선호는 순수 예측/자동 위임과 반대 신호로 처리
+        "Q15": -1
     },
     "Delegation": {
         "Q16": +1, "Q25": +1, "Q27": +1,
@@ -140,7 +200,7 @@ AXIS_WEIGHTS = {
     },
 }
 
-# Optional domain scenarios
+# Required domain scenarios
 SCENARIOS = {
     "고객센터": "당신은 고객 불만을 처리하는 상담사입니다. 반복적으로 비슷한 불만을 접수하며, AI 도우미가 초안을 제시합니다. "
                "AI의 감정 톤(공감/중립)과 설명(근거·사실)이 신뢰와 효율에 어떤 영향을 줄지 상상해 주세요.",
@@ -160,20 +220,26 @@ LIKERT_MAP = {
 }
 
 # -----------------------------
-# Survey Tab
+# Tabs
 # -----------------------------
-tab1, tab2, tab3 = st.tabs(["✍️ 설문 응답", "📊 유형/전략 매핑", "🧠 결과 요약 및 권고"])
+tab1, tab2, tab3 = st.tabs(["✍️ 설문 응답(필수 정보 포함)", "📊 유형/전략 매핑", "🧠 결과 요약 및 권고"])
 
+# -----------------------------
+# Survey Tab (Required fields)
+# -----------------------------
 with tab1:
-    st.subheader("✍️ Q-Method Likert 설문 (시나리오 선택은 선택 사항)")
-    colA, colB = st.columns([1,1])
-    with colA:
-        show_scenario = st.checkbox("도메인 시나리오 보기", value=True)
-        domain = st.selectbox("도메인 선택", list(SCENARIOS.keys()), index=0)
-        if show_scenario:
-            st.info(SCENARIOS[domain])
-    with colB:
-        pid = st.text_input("응답자 ID 또는 이메일(선택)", placeholder="익명 가능")
+    st.subheader("✍️ Q-Method Likert 설문")
+    st.markdown("- 시나리오 **필수 선택** · 이메일 **필수 입력**")
+
+    domain_options = ["— 시나리오 선택 —"] + list(SCENARIOS.keys())
+    domain = st.selectbox("시나리오를 선택해 주세요 (필수)", options=domain_options, index=0)
+
+    if domain in SCENARIOS:
+        st.info(SCENARIOS[domain])
+    else:
+        st.warning("시나리오를 선택하면 설명이 표시됩니다.")
+
+    email = st.text_input("이메일을 입력해 주세요 (필수)")
 
     with st.form("likert_form"):
         answers = {}
@@ -184,46 +250,82 @@ with tab1:
         submitted = st.form_submit_button("제출")
 
     if submitted:
-        row = {**answers, "domain": domain, "pid": pid, "ts": datetime.datetime.now().isoformat()}
-        if os.path.exists(DATA_PATH):
-            df_old = pd.read_csv(DATA_PATH)
-            df_all = pd.concat([df_old, pd.DataFrame([row])], ignore_index=True)
+        # 필수 조건 체크
+        valid_domain = domain in SCENARIOS
+        valid_email = is_valid_email(email)
+
+        if not valid_domain and not valid_email:
+            st.error("시나리오를 선택하고, 올바른 이메일을 입력해 주세요.")
+        elif not valid_domain:
+            st.error("시나리오를 선택해 주세요.")
+        elif not valid_email:
+            st.error("올바른 이메일 형식을 입력해 주세요 (예: name@example.com).")
         else:
-            df_all = pd.DataFrame([row])
-        df_all.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
-        st.success("응답이 저장되었습니다. 감사합니다!")
+            try:
+                row = {
+                    **answers,
+                    "domain": domain,
+                    "email": email.strip(),
+                    "ts": datetime.datetime.now().isoformat()
+                }
+                df_old = load_csv_safe(DATA_PATH)
+                if df_old is None:
+                    df_all = pd.DataFrame([row])
+                else:
+                    df_old, _ = ensure_q_columns(df_old, q_count=len(Q_SET))
+                    df_all = pd.concat([df_old, pd.DataFrame([row])], ignore_index=True)
+
+                if save_csv_safe(df_all, DATA_PATH):
+                    st.success("응답이 저장되었습니다. 감사합니다! (최초 실행이라면 파일이 새로 생성되었습니다)")
+            except Exception as e:
+                st.error(f"응답 저장 중 오류가 발생했습니다: {e}")
 
 # -----------------------------
 # Analysis Helpers
 # -----------------------------
 def _eigen_k(df_numeric):
     """Compute number of factors by Kaiser (eig >= 1)."""
-    # Correlation matrix eigenvalues
-    corr = np.corrcoef(df_numeric.T)
-    eigvals = np.linalg.eigvalsh(corr)
-    return int(np.sum(eigvals >= 1.0)), eigvals[::-1]
+    try:
+        corr = np.corrcoef(df_numeric.T)
+        if not np.isfinite(corr).all():
+            corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+        eigvals = np.linalg.eigvalsh(corr)
+        return int(np.sum(eigvals >= 1.0)), eigvals[::-1]
+    except Exception:
+        return 2, np.array([1.1, 1.05])
 
 def factor_or_pca(df_numeric, n_factors=None):
     """Fit FactorAnalyzer (if available) else PCA; return loadings DataFrame and model name."""
     cols = df_numeric.columns
     if n_factors is None or n_factors < 1:
         k, _ = _eigen_k(df_numeric)
-        n_factors = max(2, min(5, k))  # clamp 2..5 for interpretability
+        n_factors = max(2, min(5, k))  # clamp 2..5
 
-    if _FA_AVAILABLE:
-        fa = FactorAnalyzer(n_factors=n_factors, rotation="varimax")
-        fa.fit(df_numeric)
-        load = pd.DataFrame(fa.loadings_, index=cols, columns=[f"Type{i+1}" for i in range(n_factors)])
-        return load, "FA", n_factors
-    else:
-        pca = PCA(n_components=n_factors)
-        comps = pca.fit_transform(df_numeric)  # scores (n_samples x n_factors) [unused]
-        # construct pseudo-loadings from components_ (n_factors x n_features)
-        load = pd.DataFrame(pca.components_.T, index=cols, columns=[f"Type{i+1}" for i in range(n_factors)])
-        return load, "PCA", n_factors
+    try:
+        if _FA_AVAILABLE:
+            fa = FactorAnalyzer(n_factors=n_factors, rotation="varimax")
+            fa.fit(df_numeric)
+            load = pd.DataFrame(fa.loadings_, index=cols, columns=[f"Type{i+1}" for i in range(n_factors)])
+            return load, "FA", n_factors
+        else:
+            pca = PCA(n_components=n_factors, random_state=42)
+            pca.fit(df_numeric)
+            load = pd.DataFrame(pca.components_.T, index=cols, columns=[f"Type{i+1}" for i in range(n_factors)])
+            return load, "PCA", n_factors
+    except Exception as e:
+        st.warning(f"요인/주성분 분석 실패: {e}. 간이 2성분 PCA로 대체합니다.")
+        try:
+            pca = PCA(n_components=2, random_state=42)
+            pca.fit(df_numeric)
+            load = pd.DataFrame(pca.components_.T, index=cols, columns=["Type1", "Type2"])
+            return load, "PCA-fallback", 2
+        except Exception as e2:
+            st.error(f"PCA 대체도 실패: {e2}")
+            load = pd.DataFrame({"Type1": np.ones(len(cols))}, index=cols)
+            return load, "Mock", 1
 
 def axis_scores_from_loadings(loadings: pd.DataFrame, axis_weights: dict) -> pd.DataFrame:
-    """Compute axis scores (Empathy, Predictive, Delegation, Collaboration) per Type using statement loadings."""
+    """Compute axis scores per Type (Empathy, Predictive, Delegation, Collaboration)."""
     out = []
     for type_col in loadings.columns:
         row = {"Type": type_col}
@@ -232,27 +334,31 @@ def axis_scores_from_loadings(loadings: pd.DataFrame, axis_weights: dict) -> pd.
             den = 0.0
             for qid, w in weights.items():
                 if qid in loadings.index:
-                    num += loadings.loc[qid, type_col] * w
-                    den += abs(w)
-            row[axis] = num / den if den > 0 else 0.0
+                    val = loadings.loc[qid, type_col]
+                    if pd.notnull(val):
+                        num += val * w
+                        den += abs(w)
+            row[axis] = (num / den) if den > 0 else 0.0
         out.append(row)
     return pd.DataFrame(out).set_index("Type")
 
 def plot_strategy_scatter(df_axes: pd.DataFrame, x, y, title):
-    fig, ax = plt.subplots()
-    ax.axhline(0, ls="--", lw=1)
-    ax.axvline(0, ls="--", lw=1)
-    ax.scatter(df_axes[x], df_axes[y])
-    for label, xy in df_axes[[x, y]].iterrows():
-        ax.annotate(label, (xy[x], xy[y]), xytext=(5,5), textcoords="offset points")
-    ax.set_xlabel(x)
-    ax.set_ylabel(y)
-    ax.set_title(title)
-    st.pyplot(fig)
+    try:
+        fig, ax = plt.subplots()
+        ax.axhline(0, ls="--", lw=1)
+        ax.axvline(0, ls="--", lw=1)
+        ax.scatter(df_axes[x], df_axes[y])
+        for label, xy in df_axes[[x, y]].iterrows():
+            ax.annotate(label, (xy[x], xy[y]), xytext=(5,5), textcoords="offset points")
+        ax.set_xlabel(x)
+        ax.set_ylabel(y)
+        ax.set_title(title)
+        st.pyplot(fig)
+    except Exception as e:
+        st.error(f"그래프 렌더링 실패: {e}")
 
 def recommendations_for_type(emp, pred, delg, coll):
     recs = []
-    # 예측 vs 공감
     if pred >= 0.2 and coll <= 0 and delg >= 0.2:
         recs.append("전략: **위임 우선 (Predictive/Delegation High)** — 저위험·정형 업무 자동화, 인간 검수 최소화")
         recs.append("운영모델: 자동 라우팅·자동응답, 예외시 에스컬레이션")
@@ -276,79 +382,86 @@ def recommendations_for_type(emp, pred, delg, coll):
 # -----------------------------
 with tab2:
     st.subheader("📊 유형 도출(Q) 및 전략 매핑")
-    if os.path.exists(DATA_PATH):
-        df = pd.read_csv(DATA_PATH)
-        # keep only Q columns
-        qcols = [c for c in df.columns if c.startswith("Q")]
-        if len(df) >= 5:
-            df_num = df[qcols].copy()
-            # small noise to avoid singularities
-            df_num = df_num + np.random.normal(0, 1e-3, df_num.shape)
-            # z-score standardize
-            df_num = (df_num - df_num.mean()) / (df_num.std(ddof=0) + 1e-8)
-
-            # Factor/PCA
-            loadings, method_name, k = factor_or_pca(df_num)
-            st.write(f"분석 방식: **{method_name}**, 추출된 유형 수: **{k}**")
-            st.dataframe(loadings.style.background_gradient(cmap='Blues', axis=None))
-
-            # Axis scores per Type
-            axes_df = axis_scores_from_loadings(loadings, AXIS_WEIGHTS)
-            st.markdown("### 📐 유형별 축 점수 (정규화 전)")
-            st.dataframe(axes_df)
-
-            # Normalize axes to -1..1 (optional)
-            axes_norm = axes_df.copy()
-            for c in axes_norm.columns:
-                vmax = max(1e-6, axes_norm[c].abs().max())
-                axes_norm[c] = axes_norm[c] / vmax
-            st.markdown("### 📐 유형별 축 점수 (정규화, -1..1)")
-            st.dataframe(axes_norm)
-
-            # Plots
-            st.markdown("#### 전략 매트릭스 1: 예측 vs 공감")
-            plot_strategy_scatter(axes_norm, "Predictive", "Empathy", "예측(Predictive) vs 공감(Empathy)")
-            st.markdown("#### 전략 매트릭스 2: 위임 vs 협업")
-            plot_strategy_scatter(axes_norm, "Delegation", "Collaboration", "위임(Delegation) vs 협업(Collaboration)")
-
-            # Download
-            st.download_button(
-                "📥 유형-축 점수 다운로드 (CSV)",
-                data=axes_norm.to_csv().encode("utf-8-sig"),
-                file_name="type_axis_scores.csv",
-                mime="text/csv"
-            )
-
-            st.markdown("---")
-            st.markdown("### 🧭 유형별 권고안 (운영모델 / 인사전략 / 서비스 혁신)")
-            rec_rows = []
-            for t, r in axes_norm.iterrows():
-                recs = recommendations_for_type(
-                    emp=r["Empathy"], pred=r["Predictive"],
-                    delg=r["Delegation"], coll=r["Collaboration"]
-                )
-                st.markdown(f"**{t}**")
-                for bullet in recs:
-                    st.markdown(f"- {bullet}")
-                rec_rows.append({
-                    "Type": t,
-                    "Empathy": r["Empathy"],
-                    "Predictive": r["Predictive"],
-                    "Delegation": r["Delegation"],
-                    "Collaboration": r["Collaboration"],
-                    "Recommendations": " | ".join(recs)
-                })
-            rec_df = pd.DataFrame(rec_rows)
-            st.download_button(
-                "📥 유형별 권고안 다운로드 (CSV)",
-                data=rec_df.to_csv(index=False).encode("utf-8-sig"),
-                file_name="type_recommendations.csv",
-                mime="text/csv"
-            )
-        else:
-            st.warning("분석에는 최소 5명의 응답이 필요합니다.")
-    else:
+    df = load_csv_safe(DATA_PATH)
+    if df is None:
         st.info("아직 수집된 응답이 없습니다. 설문 탭에서 먼저 응답을 수집하세요.")
+    else:
+        df, qcols = ensure_q_columns(df, q_count=len(Q_SET))
+        qcols = [c for c in qcols if c in df.columns]
+        df_q = df[qcols].copy()
+
+        # 유효 응답자(문항 60% 이상 응답)만 분석
+        valid_mask = df_q.notna().sum(axis=1) >= max(5, int(len(qcols) * 0.6))
+        df_q = df_q[valid_mask]
+
+        n = len(df_q)
+        st.write(f"현재 유효 응답자 수: **{n}명**")
+        if n < MIN_N_FOR_ANALYSIS:
+            st.warning(f"분석에는 최소 {MIN_N_FOR_ANALYSIS}명의 유효 응답이 필요합니다.")
+        elif df_q.shape[1] < 3:
+            st.warning("유효 문항 수가 부족합니다.")
+        else:
+            try:
+                df_num = df_q.astype(float) + np.random.normal(0, 1e-3, df_q.shape)  # 작은 노이즈
+                df_num = (df_num - df_num.mean()) / (df_num.std(ddof=0) + 1e-8)       # 표준화
+
+                loadings, method_name, k = factor_or_pca(df_num)
+                st.write(f"분석 방식: **{method_name}**, 추출된 유형 수: **{k}**")
+                st.dataframe(loadings.style.background_gradient(cmap='Blues', axis=None))
+
+                axes_df = axis_scores_from_loadings(loadings, AXIS_WEIGHTS)
+                st.markdown("### 📐 유형별 축 점수 (정규화 전)")
+                st.dataframe(axes_df)
+
+                # -1..1 정규화
+                axes_norm = axes_df.copy()
+                for c in axes_norm.columns:
+                    vmax = max(1e-6, axes_norm[c].abs().max())
+                    axes_norm[c] = axes_norm[c] / vmax
+                st.markdown("### 📐 유형별 축 점수 (정규화, -1..1)")
+                st.dataframe(axes_norm)
+
+                st.markdown("#### 전략 매트릭스 1: 예측 vs 공감")
+                plot_strategy_scatter(axes_norm, "Predictive", "Empathy", "예측(Predictive) vs 공감(Empathy)")
+
+                st.markdown("#### 전략 매트릭스 2: 위임 vs 협업")
+                plot_strategy_scatter(axes_norm, "Delegation", "Collaboration", "위임(Delegation) vs 협업(Collaboration)")
+
+                st.download_button(
+                    "📥 유형-축 점수 다운로드 (CSV)",
+                    data=axes_norm.to_csv().encode("utf-8-sig"),
+                    file_name="type_axis_scores.csv",
+                    mime="text/csv"
+                )
+
+                st.markdown("---")
+                st.markdown("### 🧭 유형별 권고안 (운영모델 / 인사전략 / 서비스 혁신)")
+                rec_rows = []
+                for t, r in axes_norm.iterrows():
+                    recs = recommendations_for_type(
+                        emp=r["Empathy"], pred=r["Predictive"],
+                        delg=r["Delegation"], coll=r["Collaboration"]
+                    )
+                    st.markdown(f"**{t}**")
+                    for bullet in recs:
+                        st.markdown(f"- {bullet}")
+                    rec_rows.append({
+                        "Type": t,
+                        "Empathy": r["Empathy"],
+                        "Predictive": r["Predictive"],
+                        "Delegation": r["Delegation"],
+                        "Collaboration": r["Collaboration"],
+                        "Recommendations": " | ".join(recs)
+                    })
+                rec_df = pd.DataFrame(rec_rows)
+                st.download_button(
+                    "📥 유형별 권고안 다운로드 (CSV)",
+                    data=rec_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="type_recommendations.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.error(f"분석 중 오류가 발생했습니다: {e}")
 
 # -----------------------------
 # Summary Tab
@@ -356,8 +469,8 @@ with tab2:
 with tab3:
     st.subheader("🧠 결과 요약 및 활용 가이드")
     st.markdown("""
-    - 본 도구는 Q-method를 **강제분포 대신 Likert**로 수집하고, 요인분석/PC 분석을 통해 **인식 유형(Type)**을 도출합니다.
-    - 유형별 축 점수(예측/공감/위임/협업)를 기반으로 두 개의 **전략 매트릭스**에 매핑합니다.
-    - 각 유형에 대해 **운영모델(에스컬레이션·KPI·HIL), 인사전략(역량·교육·보상), 서비스 혁신(하이브리드 블루프린트)** 권고안을 생성합니다.
-    - 시나리오는 선택 사항이며, 동일 Q-set만으로도 분석이 가능합니다.
+    - 본 도구는 Q-method를 **Likert**로 수집하고, 요인/주성분 분석으로 **인식 유형(Type)**을 도출합니다.
+    - 유형별 축 점수(예측/공감/위임/협업)로 두 개의 **전략 매트릭스**에 매핑합니다.
+    - 각 유형에 대해 **운영모델(에스컬레이션·정서KPI·HIL), 인사전략(역량·교육·보상), 서비스 혁신(하이브리드 설계)** 권고안을 생성합니다.
+    - 시나리오는 **필수** 선택, 이메일은 **필수** 입력입니다.
     """)

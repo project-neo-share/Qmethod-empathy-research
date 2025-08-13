@@ -368,11 +368,3 @@ with tab3:
     - 시나리오는 선택 사항이며, 동일 Q-set만으로도 분석이 가능합니다.
     """)
 ''')
-
-# Write to file
-file_path = "/mnt/data/q_method_tadt_app.py"
-with open(file_path, "w", encoding="utf-8") as f:
-    f.write(app_code)
-
-print(f"Saved to {file_path}")
-

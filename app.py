@@ -1,9 +1,3 @@
-# Create a ready-to-run Streamlit app implementing Likert-based Q-Method (TADT) with strategy matrices.
-# The file will be saved so the user can download it.
-
-from textwrap import dedent
-
-app_code = dedent(r'''
 """
 Q-Method (TADT) Streamlit Application
 

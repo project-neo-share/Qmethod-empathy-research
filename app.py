@@ -1,21 +1,11 @@
 """
-Q-Method (TADT) — Person-Centred (Q) Analyzer + GitHub Auto Push
-
+Q-Method (TADT Research) — Q Analyzer
+@Author: Prof. Dr. Songhee Kang
+@Date: 2025.08.14. 
 - 사람 요인화(Q): 응답자 간 상관행렬 → 고유분해 → Varimax 회전 → 유형/배정/상하위 진술
 - CSV가 '존재하지만 비어있는' 경우 첫 제출로 같은 파일에 채움
 - 제출 시 GitHub에 즉시 커밋(REST API, PyGithub 불요)
 - 사이드바: 자동 동기화 토글 / 지금 동기화 버튼 / 관리자 다운로드
-
-Secrets(.streamlit/secrets.toml):
-[github]
-token = "ghp_..."         # repo 또는 public_repo scope
-repo = "owner/repo"
-branch = "main"
-data_path = "data/responses_tadt.csv"
-readme_path = "README.md"  # (옵션)
-
-[admin]
-password = "secret123"     # (옵션)
 """
 
 import os, re, base64, json, datetime

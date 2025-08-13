@@ -179,7 +179,7 @@ with tab1:
         answers = {}
         for i, stmt in enumerate(Q_SET, start=1):
             qid = f"Q{i:02d}"
-            sel = st.radio(f"{i}. {stmt}", LIKERT, horizontal=False, key=f"r_{qid}")
+            sel = st.radio(f"{i}. {stmt}", LIKERT, horizontal=True, key=f"r_{qid}")
             answers[qid] = LIKERT_MAP[sel]
         submitted = st.form_submit_button("제출")
 

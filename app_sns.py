@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 # -----------------------------
 # Page & Globals
 # -----------------------------
-st.set_page_config(page_title="Q-Method (TADT Research) Analyzer", layout="wide")
-st.title("Q-Method (TADT Research) Analyzer")
+st.set_page_config(page_title="Q-Method (SNS Research) Analyzer", layout="wide")
+st.title("Q-Method (SNS Research) Analyzer")
 
 DATA_PATH = "responses_sns.csv"   # 로컬 CSV 경로
 MIN_N_FOR_ANALYSIS = 5
@@ -52,7 +52,7 @@ def _get_secret(path, default=""):
 GH_TOKEN   = _get_secret("github.token")
 GH_REPO    = _get_secret("github.repo")
 GH_BRANCH  = _get_secret("github.branch", "main")
-GH_REMOTEP = _get_secret("github.data_path", "responses_tadt.csv")  # 원격 저장 경로
+GH_REMOTEP = _get_secret("github.data_path", "responses_sns.csv")  # 원격 저장 경로
 GH_README  = _get_secret("github.readme_path", "README.md")         # (옵션)
 
 # -----------------------------
@@ -78,7 +78,7 @@ def _gh_headers(token):
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json",
-        "User-Agent": "streamlit-qmethod-tadt"
+        "User-Agent": "streamlit-qmethod-sns"
     }
 
 def gh_get_sha(owner_repo, path, token, branch):
@@ -106,7 +106,7 @@ def gh_put_file(owner_repo, path, token, branch, content_bytes, message):
         return True, r.json()
     return False, f"{r.status_code}: {r.text}"
 
-def push_csv_to_github(local_path, remote_path=None, note="Update responses_tadt.csv"):
+def push_csv_to_github(local_path, remote_path=None, note="Update responses_sns.csv"):
     if not (GH_TOKEN and GH_REPO):
         return False, "GitHub secrets 누락(github.token, github.repo)"
     if remote_path is None:
@@ -483,7 +483,7 @@ with tab3:
 token = "ghp_..."
 repo  = "owner/repo"
 branch = "main"
-data_path = "data/responses_tadt.csv"
+data_path = "data/responses_sns.csv"
         """, language="toml")
     else:
         st.success(f"원격: {GH_REPO} @ {GH_BRANCH}\n경로: {GH_REMOTEP}")

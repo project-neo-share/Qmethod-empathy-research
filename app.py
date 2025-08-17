@@ -277,15 +277,40 @@ with tab1:
     **🧑‍🤝‍🧑 공동 연구기관:** **한국공학대학교 · 경희대학교 · 국민대학교**
     """)
     # ────────────────────────────────────────────────────────────────────────────────
-
+    # --- 스타일: 글자 크기 조금 작게 ---
+    st.markdown("""
+    <style>
+    /* subheader(=h3) 크기 살짝 축소 */
+    h3 { font-size: 1.05rem; }
+    
+    /* 각 문항 라벨(질문 텍스트) 폰트 축소 */
+    div[data-testid="stRadio"] > label { 
+      font-size: 0.98rem; 
+    }
+    
+    /* 라디오 옵션(font) 축소 */
+    div[data-testid="stRadio"] div[role="radiogroup"] label {
+      font-size: 0.95rem;
+    }
+    
+    /* 이메일 입력 라벨 축소 */
+    label[for*="email"] { font-size: 0.98rem; }
+    </style>
+    """, unsafe_allow_html=True)
+    
     st.subheader("응답 입력 (이메일 필수)")
-    email = st.text_input("이메일(필수) — 후속 패널 조사/보상 안내용으로, 관련법에 의거 사용목적에 따라 활용후 폐기됩니다.")
+    email = st.text_input(
+        "이메일(필수) — 후속 패널 조사/보상 안내용으로, 관련법에 의거 사용목적에 따라 활용 후 폐기됩니다.",
+        key="email_input",
+        placeholder="your.name@example.com"
+    )
+    
     with st.form("likert_form"):
         answers = {}
         for i, stmt in enumerate(Q_SET, start=1):
             qid = f"Q{i:02d}"
-            sel = st.radio(f"{i}. {stmt}", LIKERT, horizontal=True, key=f"r_{qid}")
-            answers[qid] = LIKERT_MAP[sel]
+            sel = st.radio(f"{i}. {stmt}", LIKERT, horizontal=True, index=None, key=f"r_{qid}")
+            answers[qid] = None if sel is None else LIKERT_MAP[sel]
         submitted = st.form_submit_button("제출")
 
     if submitted:

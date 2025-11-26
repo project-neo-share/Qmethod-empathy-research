@@ -449,13 +449,32 @@ if uploaded_file:
             with col1:
                 st.subheader("Explained Variance")
                 st.write(engine.explained_variance)
-            with col2:
+           with col2:
                 st.subheader("Significant Types (>0.4)")
+                # Improved Assignment: Threshold based
                 loadings = engine.loadings
+                # Only count if max loading > 0.4
                 max_vals = np.max(np.abs(loadings), axis=1)
                 max_idxs = np.argmax(np.abs(loadings), axis=1)
+                
+                # Filter meaningless loadings
                 valid_types = [f"Type {i+1}" if v > 0.4 else "None" for i, v in zip(max_idxs, max_vals)]
-                st.write(pd.Series(valid_types).value_counts().sort_index())
+                
+                # [UPDATE] Statistics Table (Count + Ratio) & Visualization
+                s_counts = pd.Series(valid_types).value_counts().sort_index()
+                total_n = len(valid_types)
+                
+                df_stat = pd.DataFrame({
+                    "Count (명)": s_counts,
+                    "Ratio (%)": (s_counts / total_n * 100).apply(lambda x: f"{x:.1f}%")
+                })
+                
+                st.dataframe(df_stat, use_container_width=True)
+                st.caption(f"Total N: {total_n}명")
+                
+                # Simple Bar Chart for distribution
+                if not s_counts.empty:
+                    st.bar_chart(s_counts)
                 
             st.subheader("Factor Loadings")
             st.dataframe(pd.DataFrame(engine.loadings, index=df.index, columns=[f"F{i+1}" for i in range(n_factors)]).style.background_gradient(cmap="Blues"))

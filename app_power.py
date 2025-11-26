@@ -319,4 +319,294 @@ def bootstrap_factor_stability(data_values: np.ndarray, k=5, B=500, phi_threshol
     return {
         'phi_mean': PHI.mean(axis=0),
         'phi_std': PHI.std(axis=0),
-        'stability_rate': (PHI >= phi_threshold).mean(axis=0
+        'stability_rate': (PHI >= phi_threshold).mean(axis=0)
+    }
+
+# ========================= UI 레이아웃 =========================
+
+st.title("📊 Q-Method Field Analysis")
+st.caption("Robust & Optimized Ver. | PART A/B/C Integration")
+
+with st.sidebar:
+    st.header("1. Data Upload")
+    file = st.file_uploader("Upload Excel (Sheets: PARTA, PARTB, PARTC)", type=["xlsx"])
+    
+    if file:
+        try:
+            parts = load_excel_parts(file.getvalue())
+            st.success(f"Loaded: {', '.join(parts.keys())}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+            st.stop()
+    else:
+        st.info("파일이 없다면 코드를 확인하거나 예제 파일을 업로드하세요.")
+        st.stop()
+
+tab_list = ["Set A", "Set B", "Set C", "Cross-Analysis", "Distinguishing", "Stability"]
+tabs = st.tabs(tab_list)
+
+# ---------- 세트별 분석 (A, B, C) ----------
+def run_set_tab(tab_obj, df_set, set_name):
+    with tab_obj:
+        st.markdown(f"### {set_name} Analysis")
+        
+        df_q, (cols, col_names) = ensure_q_columns(df_set)
+        
+        # 결측치 많은 응답자 제거 (60% 이상 응답 필수)
+        valid_mask = df_q[cols].notna().sum(axis=1) >= (len(cols) * 0.6)
+        df_clean = df_q[valid_mask].copy()
+        
+        n_obs = len(df_clean)
+        st.markdown(f"**N = {n_obs}** (Valid Respondents) | Items = {len(cols)}")
+        
+        if n_obs < MIN_N_FOR_ANALYSIS:
+            st.warning(f"데이터가 너무 적습니다. (최소 {MIN_N_FOR_ANALYSIS}명 권장)")
+            return
+
+        # 옵션
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            metric = st.selectbox("Correlation", ["Pearson", "Spearman"], key=f"corr_{set_name}")
+        with c2:
+            n_factors = st.number_input("Factors (0=Auto)", 0, 7, 0, key=f"nf_{set_name}")
+        with c3:
+            rotate = st.checkbox("Varimax Rotation", True, key=f"rot_{set_name}")
+            
+        # 분석 실행
+        try:
+            loadings, eigvals, R, arrays = person_q_analysis(
+                df_clean, metric, n_factors, rotate
+            )
+            
+            K = loadings.shape[1]
+            factor_cols = [f"F{i+1}" for i in range(K)]
+            
+            # 1. Loadings Table
+            st.markdown("#### Factor Loadings")
+            load_df = pd.DataFrame(loadings, columns=factor_cols)
+            load_df.insert(0, "email", df_clean["email"].values)
+            
+            # 스타일링: 높은 적재치 강조
+            st.dataframe(
+                load_df.style.background_gradient(cmap="Blues", subset=factor_cols, vmin=-1, vmax=1),
+                use_container_width=True
+            )
+            
+            # 2. Type Assignment
+            assign_df = assign_types(loadings, df_clean["email"].values)
+            st.markdown("#### Type Assignment Summary")
+            counts = assign_df[assign_df["Assigned"]]["Type"].value_counts().sort_index()
+            st.write(counts.to_dict())
+            
+            with st.expander("See Assignment Details"):
+                st.dataframe(assign_df)
+                
+            # 3. Factor Arrays (Z-scores)
+            st.markdown("#### Factor Arrays (Item Z-scores)")
+            arrays_df = pd.DataFrame(arrays.T, index=col_names, columns=factor_cols)
+            st.dataframe(arrays_df.style.background_gradient(cmap="RdBu_r", vmin=-2, vmax=2), use_container_width=True)
+            
+            # Download
+            csv = arrays_df.to_csv().encode('utf-8-sig')
+            st.download_button("📥 Download Factor Arrays", csv, f"{set_name}_arrays.csv", "text/csv")
+            
+        except Exception as e:
+            st.error(f"Analysis Error: {str(e)}")
+
+# 탭 실행
+if "A" in parts: run_set_tab(tabs[0], parts["A"], "Set A")
+else: tabs[0].info("No data for Set A")
+
+if "B" in parts: run_set_tab(tabs[1], parts["B"], "Set B")
+else: tabs[1].info("No data for Set B")
+
+if "C" in parts: run_set_tab(tabs[2], parts["C"], "Set C")
+else: tabs[2].info("No data for Set C")
+
+
+# ---------- 공통 교차분석 ----------
+with tabs[3]:
+    st.header("Cross-Set Analysis (Common Items)")
+    
+    common_ids = common_C35_columns(parts)
+    selected_common = st.multiselect("Select Common Items (C01~C35)", common_ids, default=common_ids)
+    
+    if len(selected_common) < 5:
+        st.warning("최소 5개 이상의 공통 문항이 필요합니다.")
+    else:
+        col_res = st.columns(3)
+        k_stars = []
+        
+        # 1. Scree Plots
+        for idx, sname in enumerate(["A", "B", "C"]):
+            if sname not in parts: continue
+            
+            with col_res[idx]:
+                st.subheader(f"Set {sname}")
+                df_part = parts[sname]
+                # 공통 문항 데이터 추출 (숫자형)
+                data_vals = df_part[selected_common].apply(pd.to_numeric, errors='coerce').fillna(0).values
+                
+                if data_vals.shape[0] < 5:
+                    st.info("Not enough data")
+                    continue
+                    
+                obs, mean_p, _, k_star = run_scree_parallel(data_vals)
+                k_stars.append(k_star)
+                
+                fig, ax = plt.subplots(figsize=(4, 3))
+                ax.plot(range(1, len(obs)+1), obs, 'o-', label='Observed')
+                ax.plot(range(1, len(mean_p)+1), mean_p, 'x--', label='Simulated', alpha=0.7)
+                ax.axvline(k_star, color='red', linestyle=':', alpha=0.5)
+                ax.set_title(f"Scree Plot (k*={k_star})")
+                ax.legend(fontsize='small')
+                st.pyplot(fig)
+        
+        # 2. Congruence
+        if len(k_stars) >= 2:
+            st.divider()
+            rec_k = int(np.median(k_stars)) if k_stars else 3
+            rec_k = max(2, min(5, rec_k))
+            
+            st.markdown(f"#### Factor Congruence (Recommended k={rec_k})")
+            
+            # 각 세트의 PCA Loadings 계산
+            loadings_map = {}
+            for sname in ["A", "B", "C"]:
+                if sname in parts:
+                    data = parts[sname][selected_common].apply(pd.to_numeric).fillna(0).values
+                    # Item Loadings (Variables=Items for consistency check)
+                    pca = PCA(n_components=rec_k)
+                    # For item congruence, we usually look at item loadings
+                    # Normalizing columns (items) standard approach
+                    L = pca.fit_transform(data.T) # (Items x k)
+                    loadings_map[sname] = L
+            
+            res_rows = []
+            pairs = [('A','B'), ('A','C'), ('B','C')]
+            for s1, s2 in pairs:
+                if s1 in loadings_map and s2 in loadings_map:
+                    phis = procrustes_congruence(loadings_map[s1], loadings_map[s2])
+                    res_rows.append({
+                        "Pair": f"{s1}-{s2}",
+                        "Mean Phi": np.mean(phis),
+                        "Min Phi": np.min(phis),
+                        "Phi per Factor": [round(p,3) for p in phis]
+                    })
+            
+            st.dataframe(pd.DataFrame(res_rows))
+
+# ---------- 구별 진술 분석 ----------
+with tabs[4]:
+    st.header("Distinguishing Statements")
+    
+    target_set = st.selectbox("Target Set", ["A", "B", "C"])
+    use_common_only = st.checkbox("Use Common Items Only (C01~C35)", value=True)
+    
+    if target_set in parts:
+        df_curr = parts[target_set]
+        
+        if use_common_only:
+            cols = common_C35_columns(parts)
+        else:
+            _, (cols, _) = ensure_q_columns(df_curr)
+            
+        if not cols:
+            st.error("No columns found.")
+        else:
+            data = df_curr[cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+            
+            # Quick Factor Analysis for Arrays
+            k_dist = st.number_input("Number of Factors", 2, 6, 3, key="dist_k")
+            
+            # Logic:
+            # 1. Calculate Factor Arrays (Z-scores)
+            # 2. Calculate Difference between Factors
+            # 3. Significance Test
+            
+            try:
+                # Reuse core logic manually for custom columns
+                # Person Correlation
+                R = np.corrcoef(standardize_rows(data.values))
+                eigvals, eigvecs = np.linalg.eigh(R)
+                idx = eigvals.argsort()[::-1]
+                L = eigvecs[:, idx][:, :k_dist] * np.sqrt(eigvals[idx][:k_dist])
+                L = varimax(L)
+                
+                # Arrays
+                Z_items = (data - data.mean()) / (data.std() + 1e-9)
+                arrays_list = []
+                for j in range(k_dist):
+                    w = L[:, j]
+                    z_j = np.dot(Z_items.T, w) / (np.sum(np.abs(w)) + 1e-9)
+                    arrays_list.append(z_j)
+                
+                Z_arr = pd.DataFrame(np.array(arrays_list).T, index=cols, columns=[f"F{i+1}" for i in range(k_dist)])
+                
+                st.subheader("Significant Differences (p < .01)")
+                
+                diff_rows = []
+                SE = 1.0 / np.sqrt(len(data)) # Standard Error approx
+                
+                for item in Z_arr.index:
+                    vals = Z_arr.loc[item].values
+                    for i in range(k_dist):
+                        for j in range(i+1, k_dist):
+                            diff = vals[i] - vals[j]
+                            z_score = diff / (np.sqrt(2) * SE * 1.96) # Simplified Z
+                            # Simple logic: if difference > threshold
+                            # Precise Q-method: diff > 2.58 * (SE * sqrt(2)) for p<.01
+                            crit_val = 2.58 * (SE * np.sqrt(2))
+                            
+                            if abs(diff) > crit_val:
+                                diff_rows.append({
+                                    "Item": item,
+                                    "F_High": f"F{i+1}" if diff > 0 else f"F{j+1}",
+                                    "F_Low": f"F{j+1}" if diff > 0 else f"F{i+1}",
+                                    "Diff": abs(diff),
+                                    "Critical_Val_01": crit_val
+                                })
+                                
+                if diff_rows:
+                    st.dataframe(pd.DataFrame(diff_rows).sort_values("Diff", ascending=False), use_container_width=True)
+                else:
+                    st.info("No distinguishing statements found at p < .01")
+                    
+            except Exception as e:
+                st.error(f"Calculation Error: {e}")
+
+# ---------- 안정도 (Bootstrap) ----------
+with tabs[5]:
+    st.header("Bootstrap Stability")
+    st.caption("Resampling Items/Persons to check factor stability")
+    
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        bs_set = st.selectbox("Set for Bootstrap", ["A", "B", "C"])
+    with col_b2:
+        n_iter = st.number_input("Iterations (B)", 100, 1000, 200, step=100)
+        
+    if bs_set in parts:
+        cols = common_C35_columns(parts)
+        if len(cols) < 5:
+            st.error("Need more common items.")
+        else:
+            data_bs = parts[bs_set][cols].apply(pd.to_numeric, errors='coerce').fillna(0).values
+            
+            if st.button("Run Bootstrap"):
+                with st.spinner("Running Bootstrap..."):
+                    res = bootstrap_factor_stability(data_bs, k=3, B=n_iter)
+                    
+                if res:
+                    st.markdown("### Stability Results")
+                    df_res = pd.DataFrame({
+                        "Mean Phi": res['phi_mean'],
+                        "Std Phi": res['phi_std'],
+                        "Stable Rate (>0.80)": res['stability_rate']
+                    }, index=[f"F{i+1}" for i in range(len(res['phi_mean']))])
+                    
+                    st.dataframe(df_res.style.background_gradient(cmap="Greens", subset=["Stable Rate (>0.80)"]))
+                    
+                    st.info("해석: Stable Rate가 0.8 이상인 요인은 표본 변동에도 견고한 요인으로 간주됩니다.")
+                else:
+                    st.error("Bootstrap Failed (Data issue)")

@@ -349,7 +349,10 @@ with tabCross:
                 st.caption(f"{sid}: k*={res['k_star']}")
 
         # 2) Procrustes 일치도
-        k_rec = int(np.median([scree_and_parallel(parts[s], 300, False)['k_star'] for s in ["A","B","C"]]))
+        k_rec = int(np.median([
+            scree_and_parallel(parts[s][common_ids], n_perm=300, show_plot=False)['k_star']
+            for s in ["A","B","C"]
+        ]))
         k_rec = max(2, min(6, k_rec))
         cong = congruence_across_sets(parts["A"], parts["B"], parts["C"], common_ids, k=k_rec)
         st.write(f"권고 요인 수 k={k_rec}")

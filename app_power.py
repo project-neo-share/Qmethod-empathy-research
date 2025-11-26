@@ -9,8 +9,8 @@ Q-Methodology Analysis Engine (Python Twin of R Script)
   3. Bootstrap Stability: Robustness test with Noise Injection
   4. Distinguishing Statements: Z-diff significance test (p < .01, .05)
   5. Humphrey's Rule: Factor significance check
-  6. Framing ATT: Non-common item bias check
-- Update (2025-11-26): Full porting of R script features.
+  6. Framing ATT: Non-common item bias check (Robust filter added)
+- Update (2025-11-26): Added heuristic filters to exclude timestamps/metadata from analysis.
 """
 
 import io
@@ -326,6 +326,9 @@ def parse_uploaded_file(file):
     parts = {}
     valid_names = ["PARTA", "PARTB", "PARTC"]
     
+    # Metadata keywords to exclude
+    meta_keywords = ['time', 'date', 'duration', 'start', 'end', 'ip', 'status', 'token']
+    
     for sname in valid_names:
         if sname in xls.sheet_names:
             df = pd.read_excel(xls, sname)
@@ -334,11 +337,29 @@ def parse_uploaded_file(file):
                 df['ID'] = [f"P{i}" for i in range(len(df))]
                 id_col = 'ID'
             numeric_df = df.apply(pd.to_numeric, errors='coerce')
-            valid_cols = numeric_df.columns[numeric_df.notna().sum() > len(df)*0.5]
+            
+            # 1. Filter by valid numeric ratio > 50%
+            valid_cols = numeric_df.columns[numeric_df.notna().sum() > len(df)*0.5].tolist()
+            
+            # 2. Exclude ID column
             valid_cols = [c for c in valid_cols if c != id_col]
-            final_df = numeric_df[valid_cols].copy()
+            
+            # 3. Exclude Metadata columns by name
+            valid_cols = [c for c in valid_cols if not any(k in str(c).lower() for k in meta_keywords)]
+            
+            # 4. Heuristic: Exclude columns with abnormally high means (e.g. Timestamps)
+            # Likert scales usually < 10. Q-sorts usually < 100.
+            # Timestamps are > 10000.
+            final_cols = []
+            for c in valid_cols:
+                # Calculate mean ignoring NaNs
+                col_mean = numeric_df[c].mean()
+                if col_mean < 20: # Threshold for Likert/Q-sort
+                    final_cols.append(c)
+            
+            final_df = numeric_df[final_cols].copy()
             final_df.index = df[id_col]
-            final_df = final_df.dropna(thresh=len(valid_cols)*0.8)
+            final_df = final_df.dropna(thresh=len(final_cols)*0.8)
             parts[sname.replace("PART", "")] = final_df
     return parts
 
@@ -359,10 +380,12 @@ def calculate_framing_att(parts, common_cols):
         non_common = [c for c in df.columns if c not in common_cols]
         if not non_common:
             mean_val = 0
+            n_items = 0
         else:
             # Grand mean of all non-common items across all people
             mean_val = np.nanmean(df[non_common].values)
-        summary.append({"Set": name, "Non-Common Mean": mean_val, "N_Items": len(non_common)})
+            n_items = len(non_common)
+        summary.append({"Set": name, "Non-Common Mean": mean_val, "N_Items": n_items})
     
     df_sum = pd.DataFrame(summary).set_index("Set")
     return df_sum

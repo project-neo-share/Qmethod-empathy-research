@@ -538,7 +538,7 @@ if uploaded_file:
         
         if st.button("Run Bootstrap"):
             with st.spinner("Bootstrapping..."):
-                res = bootstrap_stability(parts[target_set].values, n_factors=3, n_boot=n_boot, corr_method=corr_method, noise_std=noise)
+                res = bootstrap_stability(parts[target_set].values, n_factors=2, n_boot=n_boot, corr_method=corr_method, noise_std=noise)
             st.dataframe(pd.DataFrame(res, index=[f"F{i+1}" for i in range(len(res['mean']))]).style.background_gradient(cmap="Greens", subset=['mean']))
 
     # --- Tab 6: Framing ATT ---

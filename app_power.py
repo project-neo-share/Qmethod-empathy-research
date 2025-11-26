@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Q-Methodology Analysis Engine (Python Twin of R Script)
-- Author: Gemini (Strict Q-Method Implementation)
+- Author: Prof. Dr. Songhee Kang
 - Reference: Brown, S. R. (1980) & R script 'q_runner_all.R' logic.
 - Core Features:
   1. Q-Analysis: PCA/Centroid -> Varimax -> Weighted Factor Arrays (Brown's Formula)
@@ -408,9 +408,9 @@ def calculate_framing_att(parts, common_cols):
 # 5. Main Execution
 # ==========================================
 
-st.title("Q-Methodology Refactored Analysis")
+st.title("Q-방법론 분석 엔진")
 st.markdown("""
-> **교수님을 위한 참고사항 (R-Script Porting):**
+> **참고사항:**
 > - **Humphrey's Rule:** 요인의 통계적 유의성을 검증하는 탭이 추가되었습니다.
 > - **Framing ATT:** **C36~C45** 등 비공통문항들의 평균 차이를 분석하여 프레이밍 효과를 체크합니다.
 > - **P-Value 기반 Distinguishing:** Z-threshold 대신 유의확률(p<.01, .05)로 구별 문항을 선별합니다.

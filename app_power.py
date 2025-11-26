@@ -409,7 +409,7 @@ if uploaded_file:
         if st.button("Run Bootstrap"):
             with st.spinner("Resampling people and comparing factor arrays..."):
                 # Use all items for internal stability
-                res = bootstrap_stability(parts[target_bs].values, n_factors=3, n_boot=n_boot, corr_method=corr_method_bs)
+                res = bootstrap_stability(parts[target_bs].values, n_factors=2, n_boot=n_boot, corr_method=corr_method_bs)
             
             st.success("Analysis Complete")
             

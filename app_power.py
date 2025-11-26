@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Q-Methodology Analysis Engine (Refactored for Accuracy)
+Q-Methodology Analysis Engine (Python Twin of R Script)
 - Author: Gemini (Strict Q-Method Implementation)
-- Reference: Brown, S. R. (1980). Political subjectivity.
-- Key Fix: Comparing 'Factor Arrays' (Item Z-scores) for stability/congruence, not Person Loadings.
-- Update (Fix): Capped weights to prevent singularity (bootstrap=1 issue) and improved type assignment logic.
-- Update (2025-11-26): Optimized for Likert 7-point scale (Row-mean imputation, Spearman option).
-- Update (Features): Added 'Distinguishing Statements' tab and 'Noise Injection' for robust bootstrap.
+- Reference: Brown, S. R. (1980) & R script 'q_runner_all.R' logic.
+- Core Features:
+  1. Q-Analysis: PCA/Centroid -> Varimax -> Weighted Factor Arrays (Brown's Formula)
+  2. Cross-Set Congruence: Tucker's Phi on Factor Arrays
+  3. Bootstrap Stability: Robustness test with Noise Injection
+  4. Distinguishing Statements: Z-diff significance test (p < .01, .05)
+  5. Humphrey's Rule: Factor significance check
+  6. Framing ATT: Non-common item bias check
+- Update (2025-11-26): Full porting of R script features.
 """
 
 import io
@@ -14,7 +18,7 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import pearsonr, spearmanr, norm as normal_dist
 from scipy.linalg import orthogonal_procrustes
 
 # ==========================================
@@ -32,7 +36,6 @@ rng = np.random.default_rng(RNG_SEED)
 
 def standardize_rows(X):
     """Row-wise Z-score normalization (Normalizing each person's sort)"""
-    # Use nanmean/nanstd to handle potential NaNs safely before they are filled/processed
     mean = np.nanmean(X, axis=1, keepdims=True)
     std = np.nanstd(X, axis=1, ddof=1, keepdims=True)
     std[std == 0] = 1.0  # Prevent division by zero
@@ -51,24 +54,20 @@ class QEngine:
     Input: Dataframe (Rows=People, Cols=Items)
     Output: Loadings, Factor Arrays (Z-scores)
     """
-    def __init__(self, data_df, n_factors=3, rotation=True, corr_method='pearson'):
+    def __init__(self, data_df, n_factors=3, rotation=True, corr_method='spearman'):
         self.raw_df = data_df
         self.n_factors = n_factors
         self.rotation = rotation
         self.corr_method = corr_method
         
         # [FIX] Data Cleaning for Likert
-        # 1. Coerce to numeric
         temp_data = data_df.apply(pd.to_numeric, errors='coerce').values
         
-        # 2. Row-wise Mean Imputation (Better than 0 for 1-7 Likert)
-        # If a user missed a question, assume their average response (neutral for them)
+        # Row-wise Mean Imputation
         row_means = np.nanmean(temp_data, axis=1)
         inds = np.where(np.isnan(temp_data))
         temp_data[inds] = np.take(row_means, inds[0])
         
-        # 3. Fill remaining NaNs (e.g., if full row was NaN) with 0 or drop? 
-        # For now, 0, but rows should have been filtered before.
         self.data = np.nan_to_num(temp_data, nan=0.0)
         
         self.n_persons, self.n_items = self.data.shape
@@ -78,33 +77,26 @@ class QEngine:
         self.eigenvalues = None
         
     def fit(self):
-        # 1. Correlation Matrix (Person x Person)
+        # 1. Correlation Matrix
         if self.corr_method == 'spearman':
-            # Spearman rank correlation
             R, _ = spearmanr(self.data, axis=1)
-            # Standardize for factor array calculation later
             z_data = standardize_rows(self.data) 
         else:
-            # Pearson on standardized sorts (Standard Q)
             z_data = standardize_rows(self.data)
             R = np.corrcoef(z_data)
         
-        # Handle NaN correlations (if standard deviation was 0)
         R = np.nan_to_num(R, nan=0.0)
         
-        # 2. Eigen Decomposition (Centroid/PCA approx)
+        # 2. Eigen Decomposition
         eigvals, eigvecs = np.linalg.eigh(R)
-        # Sort descending
         idx = eigvals.argsort()[::-1]
         eigvals = eigvals[idx]
         eigvecs = eigvecs[:, idx]
         
-        self.eigenvalues = eigvals # Store for Scree
+        self.eigenvalues = eigvals
         
         # 3. Extract Factors
-        # Loadings = Eigenvector * sqrt(Eigenvalue)
         k = self.n_factors
-        # Ensure non-negative eigenvalues for sqrt
         valid_eigvals = np.maximum(eigvals[:k], 0)
         L = eigvecs[:, :k] * np.sqrt(valid_eigvals)
         
@@ -115,8 +107,7 @@ class QEngine:
         self.loadings = L
         self.explained_variance = eigvals[:k]
         
-        # 5. Calculate Factor Arrays (The Critical Step)
-        # Always use Z-scores for array calculation to normalize scale differences
+        # 5. Calculate Factor Arrays
         self.factor_arrays = self._calculate_factor_arrays(L, z_data)
         
         return self
@@ -138,42 +129,71 @@ class QEngine:
 
     def _calculate_factor_arrays(self, loadings, z_data):
         """
-        Calculates Item Z-scores for each factor.
-        Uses Standard Q Formula: Weight = f / (1 - f^2)
-        Fix: Caps loadings at 0.95 to avoid singularity/dominance.
+        Calculates Item Z-scores using Brown's Weighting Formula.
+        Weight = f / (1 - f^2)
         """
         n_items = z_data.shape[1]
         arrays = np.zeros((n_items, self.n_factors))
         
         for f in range(self.n_factors):
             l_vec = loadings[:, f]
-            
-            # [FIX] Cap loadings at 0.95. 
+            # Cap at 0.95 to prevent singularity
             l_clean = np.clip(l_vec, -0.95, 0.95)
             
+            # Brown's weighting
             weights = l_clean / (1 - l_clean**2)
             
-            # If all weights are near zero (unlikely), handle gracefully
             w_abs_sum = np.sum(np.abs(weights))
             if w_abs_sum < 1e-6:
                 arrays[:, f] = 0
                 continue
                 
-            # Weighted sum of sorts
             weighted_sum = np.dot(weights, z_data)
             
-            # Normalize to Z-scores (Standardize array)
+            # Normalize to Z-scores
             arr_mean = np.mean(weighted_sum)
             arr_std = np.std(weighted_sum, ddof=1)
             if arr_std == 0: arr_std = 1.0
             
             arrays[:, f] = (weighted_sum - arr_mean) / arr_std
             
-        return arrays # (Items x Factors)
+        return arrays
 
-def find_distinguishing_items(factor_arrays, n_factors, threshold=1.0, item_labels=None):
+def check_humphreys_rule(loadings, n_persons):
     """
-    Identifies items that distinguish each factor from all others.
+    Checks Humphrey's Rule for factor significance.
+    Rule: Product of two highest loadings > 2 / sqrt(N)
+    """
+    n_factors = loadings.shape[1]
+    threshold = 2 * (1 / np.sqrt(n_persons))
+    
+    results = []
+    for f in range(n_factors):
+        # Get absolute loadings for this factor
+        abs_loads = np.sort(np.abs(loadings[:, f]))[::-1] # Descending
+        
+        if len(abs_loads) >= 2:
+            prod = abs_loads[0] * abs_loads[1]
+            pass_rule = prod > threshold
+            results.append({
+                "Factor": f"F{f+1}",
+                "Product (L1*L2)": prod,
+                "Threshold": threshold,
+                "Pass": pass_rule
+            })
+        else:
+             results.append({
+                "Factor": f"F{f+1}",
+                "Product (L1*L2)": 0,
+                "Threshold": threshold,
+                "Pass": False
+            })
+    return pd.DataFrame(results)
+
+def find_distinguishing_items_r_logic(factor_arrays, n_factors, item_labels=None, se=0.30, alpha=0.01):
+    """
+    Identifies distinguishing items using R script logic (Z-diff test).
+    z_stat = diff / (sqrt(2) * se)
     """
     col_names = [f"F{i+1}" for i in range(n_factors)]
     df_arrays = pd.DataFrame(factor_arrays, columns=col_names)
@@ -181,33 +201,50 @@ def find_distinguishing_items(factor_arrays, n_factors, threshold=1.0, item_labe
         df_arrays.index = item_labels
 
     distinguishing_dict = {}
+    
+    # Critical Z for alpha (two-tailed)
+    crit_z = normal_dist.ppf(1 - alpha/2) # e.g., 2.58 for 0.01
 
     for i in range(n_factors):
         target_col = f"F{i+1}"
         other_cols = [c for c in df_arrays.columns if c != target_col]
-        
         if not other_cols: continue 
 
-        # 1. Compare target vs max of others (Is it significantly HIGHER?)
-        # Z_target > Z_other + threshold (for all others)
-        diff_high = df_arrays[target_col] - df_arrays[other_cols].max(axis=1)
-        dist_high_mask = diff_high > threshold
+        # We need to find items where Target is significantly different from ALL others
+        # Logic: Find min(abs(diff)) against all others. If that min diff is significant, then it distinguishes from everyone.
         
-        # 2. Compare target vs min of others (Is it significantly LOWER?)
-        # Z_target < Z_other - threshold (for all others)
-        diff_low = df_arrays[target_col] - df_arrays[other_cols].min(axis=1)
-        dist_low_mask = diff_low < -threshold
+        is_higher_all = pd.Series(True, index=df_arrays.index)
+        is_lower_all = pd.Series(True, index=df_arrays.index)
+        min_diff_val = pd.Series(np.inf, index=df_arrays.index)
         
-        # Combine
-        dist_mask = dist_high_mask | dist_low_mask
+        for other in other_cols:
+            diff = df_arrays[target_col] - df_arrays[other]
+            z_stat = diff / (np.sqrt(2) * se)
+            
+            # Check significance
+            is_sig_higher = (z_stat > crit_z)
+            is_sig_lower = (z_stat < -crit_z)
+            
+            is_higher_all &= is_sig_higher
+            is_lower_all &= is_sig_lower
+            
+            # Keep track of the 'smallest' difference (closest neighbor)
+            # because that's the bottleneck for distinguishing
+            current_diff_abs = np.abs(diff)
+            update_mask = current_diff_abs < np.abs(min_diff_val)
+            min_diff_val[update_mask] = diff[update_mask]
+
+        dist_mask = is_higher_all | is_lower_all
         dist_items = df_arrays[dist_mask].copy()
         
-        # Add metadata
-        dist_items['Distinction'] = np.where(dist_high_mask[dist_mask], 'Higher', 'Lower')
-        dist_items['Difference'] = np.where(dist_high_mask[dist_mask], diff_high[dist_mask], diff_low[dist_mask])
-        dist_items = dist_items.sort_values('Difference', ascending=False, key=abs)
-        
-        distinguishing_dict[target_col] = dist_items
+        if not dist_items.empty:
+            dist_items['Distinction'] = np.where(is_higher_all[dist_mask], 'Higher', 'Lower')
+            dist_items['Min Difference'] = min_diff_val[dist_mask]
+            dist_items['Z-Stat (vs Closest)'] = dist_items['Min Difference'] / (np.sqrt(2) * se)
+            dist_items['P-Value'] = 2 * (1 - normal_dist.cdf(np.abs(dist_items['Z-Stat (vs Closest)'])))
+            
+            dist_items = dist_items.sort_values('Min Difference', ascending=False, key=abs)
+            distinguishing_dict[target_col] = dist_items
         
     return distinguishing_dict
 
@@ -216,55 +253,41 @@ def find_distinguishing_items(factor_arrays, n_factors, threshold=1.0, item_labe
 # ==========================================
 
 @st.cache_data(show_spinner=False)
-def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='pearson', noise_std=0.0):
+def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='spearman', noise_std=0.0):
     """
     Checks if the Factor Arrays (Item profiles) remain consistent
     when people are resampled.
-    
-    [Feature] noise_std: Inject random gaussian noise (mean=0, std=noise_std) 
-    to prevent trivial 1.0 stability in small samples or single-person dominance.
     """
-    # 1. Original Solution
     base_engine = QEngine(pd.DataFrame(df_values), n_factors=n_factors, corr_method=corr_method).fit()
-    base_arrays = base_engine.factor_arrays # (Items x Factors)
+    base_arrays = base_engine.factor_arrays 
     
     n_persons = df_values.shape[0]
     phi_results = np.zeros((n_boot, n_factors))
     
     for b in range(n_boot):
-        # Resample People (Rows)
         indices = rng.choice(n_persons, size=n_persons, replace=True)
-        # Check if we have enough variance (at least 3 distinct people)
         if len(np.unique(indices)) < 3:
             phi_results[b, :] = np.nan
             continue
             
         sample_data = pd.DataFrame(df_values[indices])
-        
-        # [Robustness] Inject Noise if requested
         if noise_std > 0:
             noise = rng.normal(0, noise_std, sample_data.shape)
             sample_data = sample_data + noise
         
-        # Run Q-Analysis on Sample
         boot_engine = QEngine(sample_data, n_factors=n_factors, corr_method=corr_method).fit()
         boot_arrays = boot_engine.factor_arrays
         
-        # Compare Factors (Best Match Strategy)
         for f in range(n_factors):
             target = base_arrays[:, f]
-            
-            # Find best match in boot_arrays
             best_phi = -1.0
             for bf in range(n_factors):
                 candidate = boot_arrays[:, bf]
                 phi = tuckers_phi(target, candidate)
                 if abs(phi) > abs(best_phi):
                     best_phi = phi
-            
             phi_results[b, f] = abs(best_phi)
             
-    # Clean NaNs
     phi_results = phi_results[~np.isnan(phi_results).any(axis=1)]
     
     return {
@@ -275,42 +298,23 @@ def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='pearson
     }
 
 @st.cache_data(show_spinner=False)
-def calculate_cross_set_congruence(parts_data, common_cols, n_factors=3, corr_method='pearson'):
-    """
-    Calculates Factor Arrays for Set A, B, C separately,
-    then calculates Phi between them.
-    """
+def calculate_cross_set_congruence(parts_data, common_cols, n_factors=3, corr_method='spearman'):
     engines = {}
-    
-    # 1. Calculate Factor Arrays for each Set
     for name, df in parts_data.items():
-        # Only use common items for valid comparison
         df_common = df[common_cols]
         engine = QEngine(df_common, n_factors=n_factors, corr_method=corr_method).fit()
-        engines[name] = engine.factor_arrays # (Items x Factors)
+        engines[name] = engine.factor_arrays 
         
     results = []
-    
-    # 2. Compare Pairwise
     pairs = [('A','B'), ('A','C'), ('B','C')]
     for s1, s2 in pairs:
         if s1 not in engines or s2 not in engines: continue
-        
-        arr1 = engines[s1]
-        arr2 = engines[s2]
-        
-        # Compare Factor 1 with Factor 1, 2 with 2...
+        arr1 = engines[s1]; arr2 = engines[s2]
         phis = []
         for f in range(n_factors):
             phi = tuckers_phi(arr1[:, f], arr2[:, f])
-            phis.append(abs(phi)) # Absolute value for sign flip
-            
-        results.append({
-            "Pair": f"{s1}-{s2}",
-            "Mean Phi": np.mean(phis),
-            "Factors": phis
-        })
-        
+            phis.append(abs(phi))
+        results.append({"Pair": f"{s1}-{s2}", "Mean Phi": np.mean(phis), "Factors": phis})
     return results
 
 # ==========================================
@@ -325,41 +329,43 @@ def parse_uploaded_file(file):
     for sname in valid_names:
         if sname in xls.sheet_names:
             df = pd.read_excel(xls, sname)
-            # Identify ID col
             id_col = next((c for c in df.columns if str(c).lower() in ['email', 'id', 'respondent']), None)
             if not id_col:
                 df['ID'] = [f"P{i}" for i in range(len(df))]
                 id_col = 'ID'
-            
-            # Filter Q-sort columns (numeric)
             numeric_df = df.apply(pd.to_numeric, errors='coerce')
-            # Keep columns with >50% valid numeric data
             valid_cols = numeric_df.columns[numeric_df.notna().sum() > len(df)*0.5]
-            
-            # Exclude ID col from data
             valid_cols = [c for c in valid_cols if c != id_col]
-            
             final_df = numeric_df[valid_cols].copy()
             final_df.index = df[id_col]
-            
-            # Drop rows with too many NaNs
             final_df = final_df.dropna(thresh=len(valid_cols)*0.8)
-            
             parts[sname.replace("PART", "")] = final_df
-            
     return parts
 
 def get_common_columns(parts):
-    # Find columns starting with C/c followed by digits
     pat = re.compile(r"^C\d+$", re.IGNORECASE)
     sets_cols = []
     for df in parts.values():
         cols = {c for c in df.columns if pat.match(str(c))}
         sets_cols.append(cols)
-    
     if not sets_cols: return []
-    common = set.intersection(*sets_cols)
-    return sorted(list(common))
+    return sorted(list(set.intersection(*sets_cols)))
+
+def calculate_framing_att(parts, common_cols):
+    """Calculates Mean differences for Non-Common items (ATT proxy)"""
+    summary = []
+    for name, df in parts.items():
+        # Identify Non-Common cols
+        non_common = [c for c in df.columns if c not in common_cols]
+        if not non_common:
+            mean_val = 0
+        else:
+            # Grand mean of all non-common items across all people
+            mean_val = np.nanmean(df[non_common].values)
+        summary.append({"Set": name, "Non-Common Mean": mean_val, "N_Items": len(non_common)})
+    
+    df_sum = pd.DataFrame(summary).set_index("Set")
+    return df_sum
 
 # ==========================================
 # 5. Main Execution
@@ -367,9 +373,10 @@ def get_common_columns(parts):
 
 st.title("Q-Methodology Refactored Analysis")
 st.markdown("""
-> **교수님을 위한 참고사항 (리커트 최적화 & 기능 추가):**
-> - **Distinguishing Statements:** 각 요인을 다른 요인들과 구분 짓는 핵심 문항을 찾아주는 탭이 추가되었습니다.
-> - **Noise Injection:** 부트스트랩 시 미세한 노이즈를 섞어(Robustness Test) 가짜 1.0 안정도를 방지합니다.
+> **교수님을 위한 참고사항 (R-Script Porting):**
+> - **Humphrey's Rule:** 요인의 통계적 유의성을 검증하는 탭이 추가되었습니다.
+> - **Framing ATT:** 비공통문항들의 평균 차이를 분석하여 프레이밍 효과를 체크합니다.
+> - **P-Value 기반 Distinguishing:** Z-threshold 대신 유의확률(p<.01, .05)로 구별 문항을 선별합니다.
 """)
 
 uploaded_file = st.sidebar.file_uploader("Upload Excel (PARTA/B/C)", type='xlsx')
@@ -377,155 +384,128 @@ uploaded_file = st.sidebar.file_uploader("Upload Excel (PARTA/B/C)", type='xlsx'
 if uploaded_file:
     parts = parse_uploaded_file(uploaded_file)
     st.sidebar.success(f"Loaded Sets: {list(parts.keys())}")
+    common_cols = get_common_columns(parts)
     
-    tab1, tab2, tab3, tab4 = st.tabs(["1. Basic Q-Analysis", "2. Cross-Set Congruence", "3. Bootstrap Stability", "4. Distinguishing Statements"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "1. Basic Q-Analysis", 
+        "2. Humphrey's Rule",
+        "3. Distinguishing Statements",
+        "4. Cross-Set Congruence", 
+        "5. Bootstrap Stability", 
+        "6. Framing ATT"
+    ])
     
     # --- Tab 1: Basic Analysis ---
     with tab1:
         st.header("Single Set Analysis")
-        
         c1, c2, c3 = st.columns(3)
-        with c1:
-            target_set = st.selectbox("Select Set", list(parts.keys()))
-        with c2:
-            n_factors = st.number_input("Number of Factors", 1, 7, 3)
-        with c3:
-            corr_method = st.selectbox("Correlation Method", ["pearson", "spearman"], index=1, help="Spearman is recommended for Likert scales.")
+        with c1: target_set = st.selectbox("Select Set", list(parts.keys()))
+        with c2: n_factors = st.number_input("Number of Factors", 1, 7, 3)
+        with c3: corr_method = st.selectbox("Correlation Method", ["pearson", "spearman"], index=1)
         
         if target_set:
             df = parts[target_set]
             engine = QEngine(df, n_factors=n_factors, corr_method=corr_method).fit()
             
             st.info(f"Top 5 Eigenvalues: {np.round(engine.eigenvalues[:5], 2)}")
-            
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("Explained Variance")
                 st.write(engine.explained_variance)
-            
             with col2:
-                st.subheader("Significant Type Assignment (>0.4)")
-                # Improved Assignment: Threshold based
+                st.subheader("Significant Types (>0.4)")
                 loadings = engine.loadings
-                # Only count if max loading > 0.4
                 max_vals = np.max(np.abs(loadings), axis=1)
                 max_idxs = np.argmax(np.abs(loadings), axis=1)
-                
-                # Filter meaningless loadings
                 valid_types = [f"Type {i+1}" if v > 0.4 else "None" for i, v in zip(max_idxs, max_vals)]
-                counts = pd.Series(valid_types).value_counts().sort_index()
-                st.write(counts)
+                st.write(pd.Series(valid_types).value_counts().sort_index())
                 
-            st.subheader("Factor Loadings (Person x Factor)")
+            st.subheader("Factor Loadings")
             st.dataframe(pd.DataFrame(engine.loadings, index=df.index, columns=[f"F{i+1}" for i in range(n_factors)]).style.background_gradient(cmap="Blues"))
-            
-            st.subheader("Factor Arrays (Item Z-scores)")
+            st.subheader("Factor Arrays (Z-scores)")
             st.dataframe(pd.DataFrame(engine.factor_arrays, index=df.columns, columns=[f"F{i+1}" for i in range(n_factors)]).style.background_gradient(cmap="RdBu_r"))
 
-    # --- Tab 2: Cross-Set Congruence ---
+    # --- Tab 2: Humphrey's Rule ---
     with tab2:
-        st.header("Cross-Set Congruence (Tucker's Phi)")
-        common_cols = get_common_columns(parts)
-        
-        if len(common_cols) < 5:
-            st.warning(f"Not enough common 'C' columns found. Found: {common_cols}")
-        else:
-            st.info(f"Analyzing using {len(common_cols)} common items: {common_cols[0]} ... {common_cols[-1]}")
-            c1, c2 = st.columns(2)
-            with c1:
-                n_factors_cross = st.slider("Factors to Compare", 2, 5, 3, key='cross_k')
-            with c2:
-                corr_method_cross = st.selectbox("Correlation Method (Cross)", ["pearson", "spearman"], index=1, key='cross_c')
+        st.header("Humphrey's Rule (Factor Significance)")
+        st.caption("Verifies if a factor is statistically significant based on its loading magnitude.")
+        if target_set:
+            # Use engine from Tab 1 context or re-run if needed (Tab 1 context is valid)
+            res_hum = check_humphreys_rule(engine.loadings, engine.n_persons)
+            st.dataframe(res_hum.style.applymap(lambda x: 'color: green' if x else 'color: red', subset=['Pass']))
+            st.info("Pass가 True인 요인만 해석하는 것이 안전합니다.")
 
-            results = calculate_cross_set_congruence(parts, common_cols, n_factors_cross, corr_method=corr_method_cross)
+    # --- Tab 3: Distinguishing Statements ---
+    with tab3:
+        st.header("Distinguishing Statements (P-Value Test)")
+        c1, c2 = st.columns(2)
+        with c1: alpha_level = st.selectbox("Significance Level (Alpha)", [0.01, 0.05], index=0)
+        with c2: se_val = st.number_input("Standard Error (SE)", 0.1, 1.0, 0.30, step=0.01, help="R script default is 0.30")
+
+        if target_set:
+            dist_dict = find_distinguishing_items_r_logic(engine.factor_arrays, n_factors, item_labels=df.columns, se=se_val, alpha=alpha_level)
             
+            tabs_dist = st.tabs([f"Factor {i+1}" for i in range(n_factors)])
+            for i, tab in enumerate(tabs_dist):
+                with tab:
+                    f_key = f"F{i+1}"
+                    items_df = dist_dict.get(f_key)
+                    if items_df is not None:
+                        st.write(f"**{len(items_df)} items (p < {alpha_level})**")
+                        st.dataframe(items_df.style.background_gradient(cmap="coolwarm", subset=["Min Difference"], vmin=-2, vmax=2))
+                    else:
+                        st.info("No distinguishing items found.")
+
+    # --- Tab 4: Cross-Set ---
+    with tab4:
+        st.header("Cross-Set Congruence")
+        if len(common_cols) < 5:
+            st.warning("Not enough common columns.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1: n_factors_cross = st.slider("Factors", 2, 5, 3, key='ck')
+            with c2: cm_cross = st.selectbox("Correlation", ["pearson", "spearman"], index=1, key='cc')
+            results = calculate_cross_set_congruence(parts, common_cols, n_factors_cross, cm_cross)
             for res in results:
-                st.subheader(f"Congruence: {res['Pair']}")
+                st.subheader(res['Pair'])
                 cols = st.columns(len(res['Factors']))
                 for i, phi in enumerate(res['Factors']):
-                    cols[i].metric(f"Factor {i+1}", f"{phi:.3f}")
-                st.caption("Values > 0.90 indicate equivalence. > 0.80 indicate high similarity.")
+                    cols[i].metric(f"F{i+1}", f"{phi:.3f}")
                 st.divider()
 
-    # --- Tab 3: Bootstrap Stability ---
-    with tab3:
-        st.header("Bootstrap Stability Test")
-        
+    # --- Tab 5: Stability ---
+    with tab5:
+        st.header("Bootstrap Stability")
         c1, c2 = st.columns(2)
-        with c1:
-            target_bs = st.selectbox("Set for Bootstrap", list(parts.keys()), key='bs_set')
-            n_boot = st.number_input("Bootstrap Iterations", 50, 1000, 100)
-        with c2:
-            corr_method_bs = st.selectbox("Correlation Method (Boot)", ["pearson", "spearman"], index=1, key='bs_c')
-            noise_level = st.slider("Noise Injection (Std Dev)", 0.0, 0.5, 0.05, 0.01, help="Add random noise to test structural robustness. 0.05-0.1 is recommended for Likert scales.")
+        with c1: n_boot = st.number_input("Iterations", 50, 1000, 100)
+        with c2: noise = st.slider("Noise (Std Dev)", 0.0, 0.5, 0.05)
         
         if st.button("Run Bootstrap"):
-            with st.spinner("Resampling people and comparing factor arrays..."):
-                # Use all items for internal stability
-                res = bootstrap_stability(
-                    parts[target_bs].values, 
-                    n_factors=3, 
-                    n_boot=n_boot, 
-                    corr_method=corr_method_bs,
-                    noise_std=noise_level
-                )
-            
-            st.success("Analysis Complete")
-            
-            res_df = pd.DataFrame({
-                "Mean Phi": res['mean'],
-                "Std Dev": res['std'],
-                "Stability Rate (>0.80)": res['rate_80'],
-                "Stability Rate (>0.90)": res['rate_90']
-            }, index=[f"Factor {i+1}" for i in range(len(res['mean']))])
-            
-            st.dataframe(res_df.style.format("{:.3f}").background_gradient(cmap="Greens", subset=["Stability Rate (>0.80)"]))
-            st.markdown("""
-            **해석 가이드:**
-            * **Noise Injection:** 노이즈를 주입했음에도 Stability Rate가 높다면, 해당 요인은 매우 견고한 구조를 가진 것입니다.
-            * **Mean Phi:** 노이즈가 있을 때 1.0보다 약간 낮게 나오는 것이 정상입니다 (0.90~0.98 등).
-            """)
+            with st.spinner("Bootstrapping..."):
+                res = bootstrap_stability(parts[target_set].values, n_factors=3, n_boot=n_boot, corr_method=corr_method, noise_std=noise)
+            st.dataframe(pd.DataFrame(res, index=[f"F{i+1}" for i in range(len(res['mean']))]).style.background_gradient(cmap="Greens", subset=['mean']))
 
-    # --- Tab 4: Distinguishing Statements ---
-    with tab4:
-        st.header("Distinguishing Statements Identification")
-        st.caption("Identify items that statistically distinguish a factor from ALL other factors.")
+    # --- Tab 6: Framing ATT ---
+    with tab6:
+        st.header("Framing ATT (Non-Common Items)")
+        st.caption("Checks if the unique items in each set introduce a systematic mean bias.")
         
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            target_set_dist = st.selectbox("Select Set", list(parts.keys()), key='dist_set')
-        with c2:
-            n_factors_dist = st.number_input("Number of Factors", 2, 7, 3, key='dist_nf')
-        with c3:
-            z_threshold = st.slider("Z-Score Difference Threshold", 0.5, 2.0, 1.0, 0.1, help="Difference in Z-score required to be considered distinguishing. Default 1.0 (approx 1 SD).")
-
-        if target_set_dist:
-            df = parts[target_set_dist]
-            # Run engine to get arrays
-            engine = QEngine(df, n_factors=n_factors_dist, corr_method=corr_method).fit() # Use method from Tab 1 or default? Use default Spearman from tab 1 if possible or just Spearman
-            # For simplicity, using same corr_method from Tab 1 if available, else Spearman default in engine logic? No, let's just create new engine.
-            # Ideally user selects correlation here too, but let's default to Spearman for Likert robustness.
+        att_df = calculate_framing_att(parts, common_cols)
+        st.dataframe(att_df)
+        
+        if len(att_df) >= 2:
+            st.markdown("#### Pairwise Differences")
+            sets = att_df.index.tolist()
+            pairs = [(a, b) for idx, a in enumerate(sets) for b in sets[idx+1:]]
             
-            dist_dict = find_distinguishing_items(engine.factor_arrays, n_factors_dist, threshold=z_threshold, item_labels=df.columns)
+            diffs = []
+            for s1, s2 in pairs:
+                m1 = att_df.loc[s1, "Non-Common Mean"]
+                m2 = att_df.loc[s2, "Non-Common Mean"]
+                diffs.append({"Pair": f"{s2} - {s1}", "Difference": m2 - m1})
             
-            st.subheader(f"Results for {target_set_dist}")
-            
-            # Display per factor
-            factor_tabs = st.tabs([f"Factor {i+1}" for i in range(n_factors_dist)])
-            
-            for i, tab in enumerate(factor_tabs):
-                f_key = f"F{i+1}"
-                with tab:
-                    items_df = dist_dict.get(f_key)
-                    if items_df is not None and not items_df.empty:
-                        st.write(f"**{len(items_df)} distinguishing items found** (Threshold > {z_threshold})")
-                        st.dataframe(items_df.style.background_gradient(cmap="coolwarm", subset=[f_key, "Difference"], vmin=-2, vmax=2))
-                        st.markdown("""
-                        * **Higher:** 이 요인이 다른 모든 요인보다 유의미하게 **더 높게** 평가한 항목
-                        * **Lower:** 이 요인이 다른 모든 요인보다 유의미하게 **더 낮게** 평가한 항목
-                        """)
-                    else:
-                        st.info("No distinguishing items found at this threshold. Try lowering the Z-Score difference.")
+            st.dataframe(pd.DataFrame(diffs))
+            st.info("차이가 0에 가까울수록 프레이밍(문항 구성)에 의한 편향이 적음을 의미합니다.")
 
 else:
     st.info("Please upload the Excel file to begin.")

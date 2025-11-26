@@ -10,7 +10,7 @@ Q-Methodology Analysis Engine (Python Twin of R Script)
   4. Distinguishing Statements: Z-diff significance test (p < .01, .05)
   5. Humphrey's Rule: Factor significance check
   6. Framing ATT: Non-common item bias check (Robust filter added)
-- Update (2025-11-26): Added heuristic filters to exclude timestamps/metadata from analysis.
+- Update (2025-11-26): Enforced C01-C35 as common items to correctly treat C36-C45 as framing items.
 """
 
 import io
@@ -364,7 +364,9 @@ def parse_uploaded_file(file):
     return parts
 
 def get_common_columns(parts):
-    pat = re.compile(r"^C\d+$", re.IGNORECASE)
+    # [FIX] Strict Regex C01-C35 (R logic)
+    # This prevents C36-C45 from being treated as common, allowing Framing ATT analysis
+    pat = re.compile(r"^C(0[1-9]|[12][0-9]|3[0-5])$", re.IGNORECASE)
     sets_cols = []
     for df in parts.values():
         cols = {c for c in df.columns if pat.match(str(c))}
@@ -381,11 +383,23 @@ def calculate_framing_att(parts, common_cols):
         if not non_common:
             mean_val = 0
             n_items = 0
+            items_str = "-"
         else:
             # Grand mean of all non-common items across all people
             mean_val = np.nanmean(df[non_common].values)
             n_items = len(non_common)
-        summary.append({"Set": name, "Non-Common Mean": mean_val, "N_Items": n_items})
+            # Summarize items
+            if len(non_common) > 5:
+                items_str = f"{non_common[0]}...{non_common[-1]} ({len(non_common)})"
+            else:
+                items_str = ", ".join(non_common)
+                
+        summary.append({
+            "Set": name, 
+            "Non-Common Mean": mean_val, 
+            "N_Items": n_items,
+            "Items": items_str
+        })
     
     df_sum = pd.DataFrame(summary).set_index("Set")
     return df_sum
@@ -398,7 +412,7 @@ st.title("Q-Methodology Refactored Analysis")
 st.markdown("""
 > **교수님을 위한 참고사항 (R-Script Porting):**
 > - **Humphrey's Rule:** 요인의 통계적 유의성을 검증하는 탭이 추가되었습니다.
-> - **Framing ATT:** 비공통문항들의 평균 차이를 분석하여 프레이밍 효과를 체크합니다.
+> - **Framing ATT:** **C36~C45** 등 비공통문항들의 평균 차이를 분석하여 프레이밍 효과를 체크합니다.
 > - **P-Value 기반 Distinguishing:** Z-threshold 대신 유의확률(p<.01, .05)로 구별 문항을 선별합니다.
 """)
 
@@ -505,13 +519,13 @@ if uploaded_file:
         
         if st.button("Run Bootstrap"):
             with st.spinner("Bootstrapping..."):
-                res = bootstrap_stability(parts[target_set].values, n_factors=2, n_boot=n_boot, corr_method=corr_method, noise_std=noise)
+                res = bootstrap_stability(parts[target_set].values, n_factors=3, n_boot=n_boot, corr_method=corr_method, noise_std=noise)
             st.dataframe(pd.DataFrame(res, index=[f"F{i+1}" for i in range(len(res['mean']))]).style.background_gradient(cmap="Greens", subset=['mean']))
 
     # --- Tab 6: Framing ATT ---
     with tab6:
         st.header("Framing ATT (Non-Common Items)")
-        st.caption("Checks if the unique items in each set introduce a systematic mean bias.")
+        st.caption("Checks if the unique items (e.g., C36-C45) in each set introduce a systematic mean bias.")
         
         att_df = calculate_framing_att(parts, common_cols)
         st.dataframe(att_df)

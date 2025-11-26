@@ -606,7 +606,7 @@ with tabs[5]:
             
             if st.button("Run Bootstrap"):
                 with st.spinner("Running Bootstrap..."):
-                    res = bootstrap_factor_stability(data_bs, k=3, B=n_iter)
+                    res = bootstrap_factor_stability(data_bs, k=5, B=n_iter)
                     
                 if res:
                     st.markdown("### Stability Results")

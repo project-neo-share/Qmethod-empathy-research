@@ -42,6 +42,18 @@ def _looks_like_qcol(name: str):
         return False
     return True
 
+def common_C35_columns(parts_dict):
+    """
+    세트 A/B/C의 공통 열 중 'C01'..'C35' 정규식을 만족하는 열만 교집합으로 반환
+    """
+    pat = re.compile(r"^C(0[1-9]|[12][0-9]|3[0-5])$")
+    def c35(cols):
+        return {c for c in cols if pat.match(str(c).strip())}
+    A_cols = c35([c for c in parts_dict["A"].columns if c!="email"])
+    B_cols = c35([c for c in parts_dict["B"].columns if c!="email"])
+    C_cols = c35([c for c in parts_dict["C"].columns if c!="email"])
+    return sorted(list(A_cols & B_cols & C_cols))
+
 @st.cache_data(show_spinner=False)
 def load_excel_parts(file_bytes: bytes, sheet_names=("PARTA","PARTB","PARTC")):
     """엑셀 바이너리 → 세트 dict('A','B','C') with email+문항, 숫자형 문항만."""
@@ -62,23 +74,26 @@ def load_excel_parts(file_bytes: bytes, sheet_names=("PARTA","PARTB","PARTC")):
         # 문항 후보
         q_cols = [c for c in raw.columns if c!=email_col and _looks_like_qcol(c)]
         num = _coerce_numeric(raw[q_cols])
-        valid_cols = [c for c in num.columns if num[c].notna().sum()>=3]
+        valid_cols = [c for c in num.columns if num[c].notna().sum()>=3]  # 최소 응답 3
         df_q = num[valid_cols].copy()
         df_q.insert(0, "email", raw[email_col].fillna("").astype(str))
         parts[sid] = df_q.reset_index(drop=True)
     return parts
 
 def ensure_q_columns(df: pd.DataFrame, q_count=None):
-    """email + 문항열만 반환 & Q_COLS/Q_SET 제공"""
+    """email + 문항열만 반환 & Q_COLS/Q_SET 제공 (숫자형 유지)"""
     cols = list(df.columns)
     if not cols or str(cols[0]).lower()!="email":
         df = df.copy()
         df.insert(0, "email", "")
-    Q_COLS = [c for c in df.columns if c!="email"]
+    # 숫자형만 유지
+    dfn = df.select_dtypes(include=[np.number]).copy()
+    Q_COLS = list(dfn.columns)
     if q_count and len(Q_COLS)>q_count:
         Q_COLS = Q_COLS[:q_count]
     Q_SET = [str(c) for c in Q_COLS]
-    return df[["email"]+Q_COLS], (Q_COLS, Q_SET)
+    df_out = pd.concat([df[["email"]], dfn[Q_COLS]], axis=1)
+    return df_out, (Q_COLS, Q_SET)
 
 def standardize_people_rows(X: np.ndarray):
     return (X - X.mean(axis=1, keepdims=True))/ (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
@@ -91,9 +106,9 @@ def person_correlation(df_only: pd.DataFrame, metric="Pearson"):
     X = dfn.to_numpy(dtype=float)
     if metric.lower().startswith("spear"):
         X_rank = np.apply_along_axis(lambda v: pd.Series(v).rank(method="average").to_numpy(), 0, X)
-        Xs = (X_rank - X_rank.mean(axis=1, keepdims=True)) / (X_rank.std(axis=1, ddof=1, keepdims=True)+1e-8)
+        Xs = standardize_people_rows(X_rank)
     else:
-        Xs = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
+        Xs = standardize_people_rows(X)
     return np.corrcoef(Xs)
 
 def varimax(Phi, gamma=1.0, q=60, tol=1e-6):
@@ -115,19 +130,19 @@ def person_q_analysis(df_q: pd.DataFrame, corr_metric="Pearson", n_factors=None,
     eigvals, eigvecs = np.linalg.eigh(R)
     idx = eigvals.argsort()[::-1]
     eigvals, eigvecs = eigvals[idx], eigvecs[:,idx]
-    # 자동 요인 수(고유값>1, 2~6로 제한)
+    # 자동 요인 수(고유값>1, 2~6 제한)
     if not n_factors or n_factors<=0:
         n_factors = int(np.sum(eigvals > 1.0))
         n_factors = max(2, min(6, n_factors))
     loadings = eigvecs[:, :n_factors]*np.sqrt(eigvals[:n_factors])  # 사람×요인
     # 문항 z-array 근사
-    X = df_only.to_numpy(dtype=float)
+    X = df_only.select_dtypes(include=[np.number]).to_numpy(dtype=float)
     Z_items = (X - X.mean(axis=0))/ (X.std(axis=0, ddof=1)+1e-8)  # 사람×문항
     arrays = []
     for j in range(n_factors):
         w = loadings[:,j]
         idx_top = np.argsort(np.abs(w))[::-1][:max(5, int(0.1*len(w)))]
-        z_j = (Z_items[idx_top].T @ w[idx_top]) / (np.sum(np.abs(w[idx_top])) + 1e-8)
+        z_j = (Z_items[idx_top].T @ w[idx_top])/(np.sum(np.abs(w[idx_top])) + 1e-8)
         arrays.append(z_j)
     arrays = np.array(arrays)  # 요인×문항
     if rotate:
@@ -158,7 +173,7 @@ def top_bottom_statements(arrays: np.ndarray, topk=TOPK_STATEMENTS):
 
 # ========================= 공통문항 교차분석(1~4) =========================
 def scree_and_parallel(df, n_perm=500, show_plot=True):
-    """스크리+병렬분석: 숫자형 열만 사용 + 최소 크기 체크"""
+    """스크리+병렬분석: 숫자열만 사용 + 최소 5×5 체크"""
     dfn = df.select_dtypes(include=[np.number]).copy()
     if dfn.shape[0] < 5 or dfn.shape[1] < 5:
         raise ValueError("병렬분석: 응답자/문항이 최소 5×5 이상이어야 합니다.")
@@ -168,7 +183,7 @@ def scree_and_parallel(df, n_perm=500, show_plot=True):
     perm_eigs = np.zeros((n_perm, p))
     for b in range(n_perm):
         X = rng.standard_normal(size=dfn.shape)
-        X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
+        X = (X - X.mean(axis=1, keepdims=True))/ (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
         Rb = np.corrcoef(X)
         perm_eigs[b] = np.linalg.eigvalsh(Rb)[::-1]
     mean_perm = perm_eigs.mean(axis=0)
@@ -179,8 +194,8 @@ def scree_and_parallel(df, n_perm=500, show_plot=True):
         ax.plot(range(1,p+1), eigvals, marker='o', label='Observed')
         ax.plot(range(1,p+1), mean_perm, marker='x', label='Parallel mean')
         ax.axvline(k_star, color='r', linestyle='--', label=f'k*={k_star}')
-        ax.set_xlabel('Factor number'); ax.set_ylabel('Eigenvalue'); ax.set_title('Scree + Parallel')
-        ax.legend(); fig.tight_layout()
+        ax.set_xlabel('Factor number'); ax.set_ylabel('Eigenvalue')
+        ax.set_title('Scree + Parallel Analysis'); ax.legend(); fig.tight_layout()
     return {'eigvals': eigvals, 'parallel_mean': mean_perm, 'k_star': k_star, 'fig': fig}
 
 def pca_loadings_on_items(df, k=5):
@@ -265,9 +280,9 @@ def bootstrap_factor_stability(df_common, k=5, B=500, phi_threshold=0.80):
 
 # ========================= 업로드 & 탭 =========================
 st.sidebar.header("데이터 업로드")
-file = st.sidebar.file_uploader("엑셀 업로드 (시트명: PARTA, PARTB, PARTC)", type=["xlsx"])
+file = st.sidebar.file_uploader("엑셀 업로드 (시트: PARTA, PARTB, PARTC)", type=["xlsx"])
 if file is None:
-    st.info("엑셀을 업로드하세요.")
+    st.info("엑셀(PARTA/B/C)을 업로드하세요.")
     st.stop()
 
 try:
@@ -343,33 +358,29 @@ with tabC: run_set_tab(parts["C"], "세트 C")
 
 # ---------- 공통 교차분석 ----------
 with tabCross:
-    st.subheader("공통문항 교차분석 (Scree+Parallel, Procrustes, 설명분산)")
-    A_cols = [c for c in parts["A"].columns if c!="email"]
-    B_cols = [c for c in parts["B"].columns if c!="email"]
-    C_cols = [c for c in parts["C"].columns if c!="email"]
-    common_auto = sorted(list(set(A_cols) & set(B_cols) & set(C_cols)))
-    common_ids = st.multiselect("공통문항 선택", common_auto, default=common_auto)
+    st.subheader("공통문항 교차분석 (C01~C35, Scree+Parallel, Procrustes, 설명분산)")
+    common_auto = common_C35_columns(parts)
+    common_ids = st.multiselect("공통문항(C01~C35) 선택", common_auto, default=common_auto)
 
     if len(common_ids) < 5:
-        st.info("공통문항 5개 이상 선택하세요.")
+        st.info("공통문항(C01~C35) 중 최소 5개 이상 선택하세요.")
     else:
         col1, col2, col3 = st.columns(3)
         for col, sid in zip([col1,col2,col3], ["A","B","C"]):
             with col:
                 try:
-                    res = scree_and_parallel(parts[sid][common_ids], n_perm=300, show_plot=True)
+                    res = scree_and_parallel(parts[sid][common_ids].select_dtypes(include=[np.number]),
+                                             n_perm=300, show_plot=True)
                     st.pyplot(res['fig'])
                     st.caption(f"{sid}: k*={res['k_star']}")
                 except Exception as e:
                     st.warning(f"{sid} Scree/Parallel 오류: {e}")
 
-        # 🔧 k_rec 계산 시에도 공통문항만 전달 + 숫자열 보장
+        # k_rec 계산: 공통문항 + 숫자열만
         try:
             k_rec = int(np.median([
-                scree_and_parallel(
-                    parts[s][common_ids].select_dtypes(include=[np.number]),  # 🔒 숫자열만
-                    n_perm=300, show_plot=False
-                )['k_star']
+                scree_and_parallel(parts[s][common_ids].select_dtypes(include=[np.number]),
+                                   n_perm=300, show_plot=False)['k_star']
                 for s in ["A","B","C"]
                 if parts[s][common_ids].select_dtypes(include=[np.number]).shape[0] >= 5
                    and parts[s][common_ids].select_dtypes(include=[np.number]).shape[1] >= 5
@@ -390,24 +401,20 @@ with tabCross:
 with tabDist:
     st.subheader("구별진술 & Humphrey’s Rule (공통문항 권장)")
     sid = st.selectbox("세트 선택", ["A","B","C"], index=0)
-    cols = [c for c in parts[sid].columns if c!="email"]
-    use_common = st.checkbox("공통문항만 사용(교집합)", value=True)
+    use_common = st.checkbox("공통문항(C01~C35)만 사용", value=True)
     if use_common:
-        common_auto = sorted(list(set([c for c in parts["A"].columns if c!="email"]) &
-                                  set([c for c in parts["B"].columns if c!="email"]) &
-                                  set([c for c in parts["C"].columns if c!="email"])))
-        target_cols = common_auto
+        target_cols = common_C35_columns(parts)
     else:
-        target_cols = cols
+        target_cols = [c for c in parts[sid].columns if c!="email"]
 
-    # 🔒 숫자형 검증
-    if parts[sid][target_cols].select_dtypes(include=[np.number]).shape[1] < 5:
-        st.warning("숫자형 문항이 5개 미만입니다. 공통문항/헤더/응답 형식을 확인하세요.")
+    df_target = parts[sid][target_cols].select_dtypes(include=[np.number]).copy()
+    if df_target.shape[1] < 5 or df_target.shape[0] < MIN_N_FOR_ANALYSIS:
+        st.warning("구별진술: 숫자형 공통문항이 5개 미만이거나 유효 응답이 부족합니다.")
     else:
         k_in = st.number_input("요인 수(0=자동)", 0, 6, 0, 1)
         k_use = None if k_in==0 else int(k_in)
         try:
-            Z, Lp = q_factor_solution(parts[sid][target_cols], k=k_use if k_use else 5)
+            Z, Lp = q_factor_solution(df_target, k=k_use if k_use else 5)
             dist = distinguishing_tests(Z, alpha=0.01, se=0.30)
             flags, thr = humphreys_rule(Lp)
             st.markdown(f"Humphrey’s rule 임계: **{thr:.3f}**")
@@ -415,22 +422,22 @@ with tabDist:
                                        "Humphreys_pass":[int(v) for v in flags.values()]}))
             st.markdown("**z-array (문항×요인)**"); st.dataframe(Z)
             st.markdown("**구별진술 후보(유의)**"); st.dataframe(dist.head(50))
+            st.download_button("📥 구별진술 CSV", data=dist.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"distinguishing_{sid}.csv", mime="text/csv")
         except Exception as e:
             st.error(f"구별진술 분석 오류: {e}")
 
 # ---------- 부트스트랩 ----------
 with tabBoot:
-    st.subheader("부트스트랩 안정도(공통문항)")
-    common_auto = sorted(list(set([c for c in parts["A"].columns if c!="email"]) &
-                              set([c for c in parts["B"].columns if c!="email"]) &
-                              set([c for c in parts["C"].columns if c!="email"])))
+    st.subheader("부트스트랩 안정도(공통문항 C01~C35)")
+    common_auto = common_C35_columns(parts)
     common_ids = st.multiselect("공통문항 선택", common_auto, default=common_auto)
     B = st.number_input("부트스트랩 반복 수", 100, 2000, 500, 50)
     phi_thr = st.slider("일치 임계 φ", 0.50, 0.95, 0.80, 0.01)
     sid = st.selectbox("세트 선택", ["A","B","C"], index=0)
 
     if len(common_ids) < 5:
-        st.info("공통문항은 최소 5개 이상 선택해 주세요.")
+        st.info("공통문항 5개 이상 선택해 주세요.")
     elif parts[sid][common_ids].select_dtypes(include=[np.number]).shape[1] < 5:
         st.warning("선택한 공통문항 중 숫자형이 5개 미만입니다.")
     else:

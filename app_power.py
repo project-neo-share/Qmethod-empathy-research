@@ -84,16 +84,16 @@ def standardize_people_rows(X: np.ndarray):
     return (X - X.mean(axis=1, keepdims=True))/ (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
 
 def person_correlation(df_only: pd.DataFrame, metric="Pearson"):
-    """🔒 숫자형 열만 사용 + 행표준화 후 사람×사람 상관행렬"""
+    """사람×사람 상관: 숫자형 열만 사용"""
     dfn = df_only.select_dtypes(include=[np.number]).copy()
     if dfn.shape[1] < 3:
-        raise ValueError("상관분석에 사용할 숫자형 문항 열이 충분하지 않습니다.")
+        raise ValueError("상관분석: 숫자형 문항 열이 3개 미만입니다.")
     X = dfn.to_numpy(dtype=float)
     if metric.lower().startswith("spear"):
         X_rank = np.apply_along_axis(lambda v: pd.Series(v).rank(method="average").to_numpy(), 0, X)
-        Xs = standardize_people_rows(X_rank)
+        Xs = (X_rank - X_rank.mean(axis=1, keepdims=True)) / (X_rank.std(axis=1, ddof=1, keepdims=True)+1e-8)
     else:
-        Xs = standardize_people_rows(X)
+        Xs = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
     return np.corrcoef(Xs)
 
 def varimax(Phi, gamma=1.0, q=60, tol=1e-6):
@@ -158,17 +158,17 @@ def top_bottom_statements(arrays: np.ndarray, topk=TOPK_STATEMENTS):
 
 # ========================= 공통문항 교차분석(1~4) =========================
 def scree_and_parallel(df, n_perm=500, show_plot=True):
-    """🔒 숫자열만 사용 + 부족시 에러"""
+    """스크리+병렬분석: 숫자형 열만 사용 + 최소 크기 체크"""
     dfn = df.select_dtypes(include=[np.number]).copy()
     if dfn.shape[0] < 5 or dfn.shape[1] < 5:
-        raise ValueError("병렬분석: 응답자/문항 수가 부족합니다(최소 5×5).")
+        raise ValueError("병렬분석: 응답자/문항이 최소 5×5 이상이어야 합니다.")
     R = person_correlation(dfn)
     eigvals = np.linalg.eigvalsh(R)[::-1]
     p = R.shape[0]
     perm_eigs = np.zeros((n_perm, p))
     for b in range(n_perm):
         X = rng.standard_normal(size=dfn.shape)
-        X = (X - X.mean(axis=1, keepdims=True))/ (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
+        X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, ddof=1, keepdims=True)+1e-8)
         Rb = np.corrcoef(X)
         perm_eigs[b] = np.linalg.eigvalsh(Rb)[::-1]
     mean_perm = perm_eigs.mean(axis=0)
@@ -179,8 +179,8 @@ def scree_and_parallel(df, n_perm=500, show_plot=True):
         ax.plot(range(1,p+1), eigvals, marker='o', label='Observed')
         ax.plot(range(1,p+1), mean_perm, marker='x', label='Parallel mean')
         ax.axvline(k_star, color='r', linestyle='--', label=f'k*={k_star}')
-        ax.set_xlabel('Factor number'); ax.set_ylabel('Eigenvalue')
-        ax.set_title('Scree + Parallel Analysis'); ax.legend(); fig.tight_layout()
+        ax.set_xlabel('Factor number'); ax.set_ylabel('Eigenvalue'); ax.set_title('Scree + Parallel')
+        ax.legend(); fig.tight_layout()
     return {'eigvals': eigvals, 'parallel_mean': mean_perm, 'k_star': k_star, 'fig': fig}
 
 def pca_loadings_on_items(df, k=5):
@@ -366,8 +366,13 @@ with tabCross:
         # 🔧 k_rec 계산 시에도 공통문항만 전달 + 숫자열 보장
         try:
             k_rec = int(np.median([
-                scree_and_parallel(parts[s][common_ids], n_perm=300, show_plot=False)['k_star']
+                scree_and_parallel(
+                    parts[s][common_ids].select_dtypes(include=[np.number]),  # 🔒 숫자열만
+                    n_perm=300, show_plot=False
+                )['k_star']
                 for s in ["A","B","C"]
+                if parts[s][common_ids].select_dtypes(include=[np.number]).shape[0] >= 5
+                   and parts[s][common_ids].select_dtypes(include=[np.number]).shape[1] >= 5
             ]))
             k_rec = max(2, min(6, k_rec))
             cong = congruence_across_sets(parts["A"], parts["B"], parts["C"], common_ids, k=k_rec)

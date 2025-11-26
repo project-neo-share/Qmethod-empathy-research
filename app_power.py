@@ -304,8 +304,8 @@ def get_common_columns(parts):
 
 st.title("Q-Methodology Refactored Analysis")
 st.markdown("""
-> **교수님을 위한 참고사항:**
-> 이 버전은 Q방법론의 **Factor Array(문항 배열)**를 직접 산출하여 비교하도록 완전히 재설계되었습니다.
+> **참고사항:**
+> 이 버전은 Q방법론의 Factor Array(문항 배열)를 직접 산출하여 비교하도록 완전히 재설계되었습니다.
 > - **안정도(Bootstrap):** 사람이 바뀌어도 '문항의 배열'이 유지되는지 확인합니다.
 > - **일치도(Congruence):** Set A와 Set B의 '문항 배열'이 얼마나 유사한지(Phi) 계산합니다.
 > - **수치 해석:** 0.80 이상이면 신뢰할 수 있는 수준입니다.

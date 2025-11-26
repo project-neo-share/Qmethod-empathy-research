@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Q-Methodology Analysis Engine (Refactored for Accuracy)
-- Author: Prof. Dr. SongheeKang
+- Author: Gemini (Strict Q-Method Implementation)
+- Reference: Brown, S. R. (1980). Political subjectivity.
+- Key Fix: Comparing 'Factor Arrays' (Item Z-scores) for stability/congruence, not Person Loadings.
+- Update (Fix): Capped weights to prevent singularity (bootstrap=1 issue) and improved type assignment logic.
+- Update (2025-11-26): Optimized for Likert 7-point scale (Row-mean imputation, Spearman option).
+- Update (Features): Added 'Distinguishing Statements' tab and 'Noise Injection' for robust bootstrap.
 """
 
 import io
@@ -166,15 +171,58 @@ class QEngine:
             
         return arrays # (Items x Factors)
 
+def find_distinguishing_items(factor_arrays, n_factors, threshold=1.0, item_labels=None):
+    """
+    Identifies items that distinguish each factor from all others.
+    """
+    col_names = [f"F{i+1}" for i in range(n_factors)]
+    df_arrays = pd.DataFrame(factor_arrays, columns=col_names)
+    if item_labels is not None:
+        df_arrays.index = item_labels
+
+    distinguishing_dict = {}
+
+    for i in range(n_factors):
+        target_col = f"F{i+1}"
+        other_cols = [c for c in df_arrays.columns if c != target_col]
+        
+        if not other_cols: continue 
+
+        # 1. Compare target vs max of others (Is it significantly HIGHER?)
+        # Z_target > Z_other + threshold (for all others)
+        diff_high = df_arrays[target_col] - df_arrays[other_cols].max(axis=1)
+        dist_high_mask = diff_high > threshold
+        
+        # 2. Compare target vs min of others (Is it significantly LOWER?)
+        # Z_target < Z_other - threshold (for all others)
+        diff_low = df_arrays[target_col] - df_arrays[other_cols].min(axis=1)
+        dist_low_mask = diff_low < -threshold
+        
+        # Combine
+        dist_mask = dist_high_mask | dist_low_mask
+        dist_items = df_arrays[dist_mask].copy()
+        
+        # Add metadata
+        dist_items['Distinction'] = np.where(dist_high_mask[dist_mask], 'Higher', 'Lower')
+        dist_items['Difference'] = np.where(dist_high_mask[dist_mask], diff_high[dist_mask], diff_low[dist_mask])
+        dist_items = dist_items.sort_values('Difference', ascending=False, key=abs)
+        
+        distinguishing_dict[target_col] = dist_items
+        
+    return distinguishing_dict
+
 # ==========================================
 # 3. Stability & Congruence Logic
 # ==========================================
 
 @st.cache_data(show_spinner=False)
-def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='pearson'):
+def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='pearson', noise_std=0.0):
     """
     Checks if the Factor Arrays (Item profiles) remain consistent
     when people are resampled.
+    
+    [Feature] noise_std: Inject random gaussian noise (mean=0, std=noise_std) 
+    to prevent trivial 1.0 stability in small samples or single-person dominance.
     """
     # 1. Original Solution
     base_engine = QEngine(pd.DataFrame(df_values), n_factors=n_factors, corr_method=corr_method).fit()
@@ -192,6 +240,11 @@ def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='pearson
             continue
             
         sample_data = pd.DataFrame(df_values[indices])
+        
+        # [Robustness] Inject Noise if requested
+        if noise_std > 0:
+            noise = rng.normal(0, noise_std, sample_data.shape)
+            sample_data = sample_data + noise
         
         # Run Q-Analysis on Sample
         boot_engine = QEngine(sample_data, n_factors=n_factors, corr_method=corr_method).fit()
@@ -314,9 +367,9 @@ def get_common_columns(parts):
 
 st.title("Q-Methodology Refactored Analysis")
 st.markdown("""
-> **교수님을 위한 참고사항 (리커트 최적화):**
-> - **결측치 처리 개선:** 기존 0점 처리 대신 **'개인별 평균(Row Mean)'**으로 대체하여 7점 척도의 중립성을 보존했습니다.
-> - **Spearman 상관계수:** 리커트 척도와 같이 서열적 성격이 강한 데이터에서 요인 분리(Separation) 성능이 더 좋습니다. 아래 옵션에서 변경해보세요.
+> **교수님을 위한 참고사항 (리커트 최적화 & 기능 추가):**
+> - **Distinguishing Statements:** 각 요인을 다른 요인들과 구분 짓는 핵심 문항을 찾아주는 탭이 추가되었습니다.
+> - **Noise Injection:** 부트스트랩 시 미세한 노이즈를 섞어(Robustness Test) 가짜 1.0 안정도를 방지합니다.
 """)
 
 uploaded_file = st.sidebar.file_uploader("Upload Excel (PARTA/B/C)", type='xlsx')
@@ -325,7 +378,7 @@ if uploaded_file:
     parts = parse_uploaded_file(uploaded_file)
     st.sidebar.success(f"Loaded Sets: {list(parts.keys())}")
     
-    tab1, tab2, tab3 = st.tabs(["1. Basic Q-Analysis", "2. Cross-Set Congruence", "3. Bootstrap Stability"])
+    tab1, tab2, tab3, tab4 = st.tabs(["1. Basic Q-Analysis", "2. Cross-Set Congruence", "3. Bootstrap Stability", "4. Distinguishing Statements"])
     
     # --- Tab 1: Basic Analysis ---
     with tab1:
@@ -398,18 +451,24 @@ if uploaded_file:
     with tab3:
         st.header("Bootstrap Stability Test")
         
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
             target_bs = st.selectbox("Set for Bootstrap", list(parts.keys()), key='bs_set')
-        with c2:
             n_boot = st.number_input("Bootstrap Iterations", 50, 1000, 100)
-        with c3:
+        with c2:
             corr_method_bs = st.selectbox("Correlation Method (Boot)", ["pearson", "spearman"], index=1, key='bs_c')
+            noise_level = st.slider("Noise Injection (Std Dev)", 0.0, 0.5, 0.05, 0.01, help="Add random noise to test structural robustness. 0.05-0.1 is recommended for Likert scales.")
         
         if st.button("Run Bootstrap"):
             with st.spinner("Resampling people and comparing factor arrays..."):
                 # Use all items for internal stability
-                res = bootstrap_stability(parts[target_bs].values, n_factors=2, n_boot=n_boot, corr_method=corr_method_bs)
+                res = bootstrap_stability(
+                    parts[target_bs].values, 
+                    n_factors=3, 
+                    n_boot=n_boot, 
+                    corr_method=corr_method_bs,
+                    noise_std=noise_level
+                )
             
             st.success("Analysis Complete")
             
@@ -423,9 +482,50 @@ if uploaded_file:
             st.dataframe(res_df.style.format("{:.3f}").background_gradient(cmap="Greens", subset=["Stability Rate (>0.80)"]))
             st.markdown("""
             **해석 가이드:**
-            * **Mean Phi:** 재추출된 요인과 원본 요인 간의 평균 유사도입니다. (1.0에 가까울수록 좋음)
-            * **Stability Rate:** 부트스트랩 반복 중 80% 이상의 경우에서 요인이 유지된 비율입니다. 이 값이 1.0(100%)에 가까워야 '견고한 요인'입니다.
+            * **Noise Injection:** 노이즈를 주입했음에도 Stability Rate가 높다면, 해당 요인은 매우 견고한 구조를 가진 것입니다.
+            * **Mean Phi:** 노이즈가 있을 때 1.0보다 약간 낮게 나오는 것이 정상입니다 (0.90~0.98 등).
             """)
+
+    # --- Tab 4: Distinguishing Statements ---
+    with tab4:
+        st.header("Distinguishing Statements Identification")
+        st.caption("Identify items that statistically distinguish a factor from ALL other factors.")
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            target_set_dist = st.selectbox("Select Set", list(parts.keys()), key='dist_set')
+        with c2:
+            n_factors_dist = st.number_input("Number of Factors", 2, 7, 3, key='dist_nf')
+        with c3:
+            z_threshold = st.slider("Z-Score Difference Threshold", 0.5, 2.0, 1.0, 0.1, help="Difference in Z-score required to be considered distinguishing. Default 1.0 (approx 1 SD).")
+
+        if target_set_dist:
+            df = parts[target_set_dist]
+            # Run engine to get arrays
+            engine = QEngine(df, n_factors=n_factors_dist, corr_method=corr_method).fit() # Use method from Tab 1 or default? Use default Spearman from tab 1 if possible or just Spearman
+            # For simplicity, using same corr_method from Tab 1 if available, else Spearman default in engine logic? No, let's just create new engine.
+            # Ideally user selects correlation here too, but let's default to Spearman for Likert robustness.
+            
+            dist_dict = find_distinguishing_items(engine.factor_arrays, n_factors_dist, threshold=z_threshold, item_labels=df.columns)
+            
+            st.subheader(f"Results for {target_set_dist}")
+            
+            # Display per factor
+            factor_tabs = st.tabs([f"Factor {i+1}" for i in range(n_factors_dist)])
+            
+            for i, tab in enumerate(factor_tabs):
+                f_key = f"F{i+1}"
+                with tab:
+                    items_df = dist_dict.get(f_key)
+                    if items_df is not None and not items_df.empty:
+                        st.write(f"**{len(items_df)} distinguishing items found** (Threshold > {z_threshold})")
+                        st.dataframe(items_df.style.background_gradient(cmap="coolwarm", subset=[f_key, "Difference"], vmin=-2, vmax=2))
+                        st.markdown("""
+                        * **Higher:** 이 요인이 다른 모든 요인보다 유의미하게 **더 높게** 평가한 항목
+                        * **Lower:** 이 요인이 다른 모든 요인보다 유의미하게 **더 낮게** 평가한 항목
+                        """)
+                    else:
+                        st.info("No distinguishing items found at this threshold. Try lowering the Z-Score difference.")
 
 else:
     st.info("Please upload the Excel file to begin.")

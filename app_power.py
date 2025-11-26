@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
+@Author: Prof.Dr.SongheeKang
 Q-정렬 현장 분석 앱 (Optimized for Stability & Speed)
 - 주요 개선: Caching 적용, 예외 처리 강화, 수치 해석 안정성 확보
+- 수정 사항(2025-11-26): 부트스트랩 안정도 로직 수정 (Loadings -> Components 비교)
 """
 
 import io
@@ -289,27 +291,36 @@ def procrustes_congruence(LA, LB):
 
 @st.cache_data(show_spinner=False)
 def bootstrap_factor_stability(data_values: np.ndarray, k=5, B=500, phi_threshold=0.80):
-    """부트스트랩 안정도 검증 (상당한 연산량 -> 캐싱 필수)"""
+    """부트스트랩 안정도 검증 (수정됨: Loadings 대신 Components 비교)"""
     N = data_values.shape[0]
     
-    # Base Solution
+    # Base Solution (문항 패턴 추출)
+    # Q방법론은 사람을 표준화하여 분석하므로, 입력 데이터를 표준화 후 PCA 수행
+    X_base = standardize_rows(data_values)
     pca = PCA(n_components=k, random_state=RNG_SEED)
-    base_L = pca.fit_transform(standardize_rows(data_values))
+    pca.fit(X_base)
+    
+    # base_C: (Items x k) - 문항에 대한 요인 점수/가중치 (변하지 않는 기준)
+    base_C = pca.components_.T 
     
     phis = []
     for b in range(B):
-        # Resample with replacement
+        # Resample with replacement (사람을 리샘플링)
         idx = rng.choice(N, size=N, replace=True)
         sample = data_values[idx]
         
         # 3명 미만이면 PCA 불가
         if len(np.unique(idx)) < 3: continue
             
+        X_boot = standardize_rows(sample)
         pca_b = PCA(n_components=k, random_state=None)
-        Lb = pca_b.fit_transform(standardize_rows(sample))
+        pca_b.fit(X_boot)
         
-        # Procrustes & Congruence
-        phi_vals = procrustes_congruence(base_L, Lb)
+        # boot_C: (Items x k) - 리샘플링된 데이터의 문항 패턴
+        boot_C = pca_b.components_.T
+        
+        # Procrustes & Congruence (문항 패턴끼리 비교해야 함)
+        phi_vals = procrustes_congruence(base_C, boot_C)
         phis.append(phi_vals)
         
     if not phis:
@@ -595,7 +606,7 @@ with tabs[5]:
             
             if st.button("Run Bootstrap"):
                 with st.spinner("Running Bootstrap..."):
-                    res = bootstrap_factor_stability(data_bs, k=5, B=n_iter)
+                    res = bootstrap_factor_stability(data_bs, k=3, B=n_iter)
                     
                 if res:
                     st.markdown("### Stability Results")

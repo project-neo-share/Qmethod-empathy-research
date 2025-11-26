@@ -2,9 +2,6 @@
 """
 Q-Methodology Analysis Engine (Refactored for Accuracy)
 - Author: Prof. Dr. SongheeKang
-- Reference: Brown, S. R. (1980). Political subjectivity.
-- Key Fix: Comparing 'Factor Arrays' (Item Z-scores) for stability/congruence, not Person Loadings.
-- Update (Fix): Capped weights to prevent singularity (bootstrap=1 issue) and improved type assignment logic.
 """
 
 import io
@@ -30,6 +27,7 @@ rng = np.random.default_rng(RNG_SEED)
 
 def standardize_rows(X):
     """Row-wise Z-score normalization (Normalizing each person's sort)"""
+    # Use nanmean/nanstd to handle potential NaNs safely before they are filled/processed
     mean = np.nanmean(X, axis=1, keepdims=True)
     std = np.nanstd(X, axis=1, ddof=1, keepdims=True)
     std[std == 0] = 1.0  # Prevent division by zero
@@ -48,13 +46,27 @@ class QEngine:
     Input: Dataframe (Rows=People, Cols=Items)
     Output: Loadings, Factor Arrays (Z-scores)
     """
-    def __init__(self, data_df, n_factors=3, rotation=True):
+    def __init__(self, data_df, n_factors=3, rotation=True, corr_method='pearson'):
         self.raw_df = data_df
-        # Ensure numeric
-        self.data = data_df.apply(pd.to_numeric, errors='coerce').fillna(0).values
-        self.n_persons, self.n_items = self.data.shape
         self.n_factors = n_factors
         self.rotation = rotation
+        self.corr_method = corr_method
+        
+        # [FIX] Data Cleaning for Likert
+        # 1. Coerce to numeric
+        temp_data = data_df.apply(pd.to_numeric, errors='coerce').values
+        
+        # 2. Row-wise Mean Imputation (Better than 0 for 1-7 Likert)
+        # If a user missed a question, assume their average response (neutral for them)
+        row_means = np.nanmean(temp_data, axis=1)
+        inds = np.where(np.isnan(temp_data))
+        temp_data[inds] = np.take(row_means, inds[0])
+        
+        # 3. Fill remaining NaNs (e.g., if full row was NaN) with 0 or drop? 
+        # For now, 0, but rows should have been filtered before.
+        self.data = np.nan_to_num(temp_data, nan=0.0)
+        
+        self.n_persons, self.n_items = self.data.shape
         self.loadings = None
         self.factor_arrays = None # (n_items x n_factors)
         self.explained_variance = None
@@ -62,9 +74,18 @@ class QEngine:
         
     def fit(self):
         # 1. Correlation Matrix (Person x Person)
-        # Using Pearson on standardized sorts
-        z_data = standardize_rows(self.data)
-        R = np.corrcoef(z_data)
+        if self.corr_method == 'spearman':
+            # Spearman rank correlation
+            R, _ = spearmanr(self.data, axis=1)
+            # Standardize for factor array calculation later
+            z_data = standardize_rows(self.data) 
+        else:
+            # Pearson on standardized sorts (Standard Q)
+            z_data = standardize_rows(self.data)
+            R = np.corrcoef(z_data)
+        
+        # Handle NaN correlations (if standard deviation was 0)
+        R = np.nan_to_num(R, nan=0.0)
         
         # 2. Eigen Decomposition (Centroid/PCA approx)
         eigvals, eigvecs = np.linalg.eigh(R)
@@ -78,7 +99,9 @@ class QEngine:
         # 3. Extract Factors
         # Loadings = Eigenvector * sqrt(Eigenvalue)
         k = self.n_factors
-        L = eigvecs[:, :k] * np.sqrt(eigvals[:k])
+        # Ensure non-negative eigenvalues for sqrt
+        valid_eigvals = np.maximum(eigvals[:k], 0)
+        L = eigvecs[:, :k] * np.sqrt(valid_eigvals)
         
         # 4. Varimax Rotation
         if self.rotation and k > 1:
@@ -88,6 +111,7 @@ class QEngine:
         self.explained_variance = eigvals[:k]
         
         # 5. Calculate Factor Arrays (The Critical Step)
+        # Always use Z-scores for array calculation to normalize scale differences
         self.factor_arrays = self._calculate_factor_arrays(L, z_data)
         
         return self
@@ -120,8 +144,6 @@ class QEngine:
             l_vec = loadings[:, f]
             
             # [FIX] Cap loadings at 0.95. 
-            # If loading is 0.99, weight explodes to ~50, causing single-person dominance.
-            # Capping at 0.95 keeps weight ~9.7, preserving contribution balance.
             l_clean = np.clip(l_vec, -0.95, 0.95)
             
             weights = l_clean / (1 - l_clean**2)
@@ -149,13 +171,13 @@ class QEngine:
 # ==========================================
 
 @st.cache_data(show_spinner=False)
-def bootstrap_stability(df_values, n_factors=3, n_boot=200):
+def bootstrap_stability(df_values, n_factors=3, n_boot=200, corr_method='pearson'):
     """
     Checks if the Factor Arrays (Item profiles) remain consistent
     when people are resampled.
     """
     # 1. Original Solution
-    base_engine = QEngine(pd.DataFrame(df_values), n_factors=n_factors).fit()
+    base_engine = QEngine(pd.DataFrame(df_values), n_factors=n_factors, corr_method=corr_method).fit()
     base_arrays = base_engine.factor_arrays # (Items x Factors)
     
     n_persons = df_values.shape[0]
@@ -172,7 +194,7 @@ def bootstrap_stability(df_values, n_factors=3, n_boot=200):
         sample_data = pd.DataFrame(df_values[indices])
         
         # Run Q-Analysis on Sample
-        boot_engine = QEngine(sample_data, n_factors=n_factors).fit()
+        boot_engine = QEngine(sample_data, n_factors=n_factors, corr_method=corr_method).fit()
         boot_arrays = boot_engine.factor_arrays
         
         # Compare Factors (Best Match Strategy)
@@ -200,7 +222,7 @@ def bootstrap_stability(df_values, n_factors=3, n_boot=200):
     }
 
 @st.cache_data(show_spinner=False)
-def calculate_cross_set_congruence(parts_data, common_cols, n_factors=3):
+def calculate_cross_set_congruence(parts_data, common_cols, n_factors=3, corr_method='pearson'):
     """
     Calculates Factor Arrays for Set A, B, C separately,
     then calculates Phi between them.
@@ -211,7 +233,7 @@ def calculate_cross_set_congruence(parts_data, common_cols, n_factors=3):
     for name, df in parts_data.items():
         # Only use common items for valid comparison
         df_common = df[common_cols]
-        engine = QEngine(df_common, n_factors=n_factors).fit()
+        engine = QEngine(df_common, n_factors=n_factors, corr_method=corr_method).fit()
         engines[name] = engine.factor_arrays # (Items x Factors)
         
     results = []
@@ -292,9 +314,9 @@ def get_common_columns(parts):
 
 st.title("Q-Methodology Refactored Analysis")
 st.markdown("""
-> **교수님을 위한 참고사항:**
-> - **Type 1 쏠림 해결:** 요인 적재치가 **0.4 이상**인 경우만 유효하게 카운트하며, 데이터가 실제로 단일 요인 구조인지 확인할 수 있게 고유값을 표시했습니다.
-> - **Bootstrap 1.0 해결:** 특정 응답자의 영향력이 무한대로 커지는 현상을 방지(가중치 제한)하여 안정도가 정상적으로(0.8~0.9 등) 계산됩니다.
+> **교수님을 위한 참고사항 (리커트 최적화):**
+> - **결측치 처리 개선:** 기존 0점 처리 대신 **'개인별 평균(Row Mean)'**으로 대체하여 7점 척도의 중립성을 보존했습니다.
+> - **Spearman 상관계수:** 리커트 척도와 같이 서열적 성격이 강한 데이터에서 요인 분리(Separation) 성능이 더 좋습니다. 아래 옵션에서 변경해보세요.
 """)
 
 uploaded_file = st.sidebar.file_uploader("Upload Excel (PARTA/B/C)", type='xlsx')
@@ -308,16 +330,21 @@ if uploaded_file:
     # --- Tab 1: Basic Analysis ---
     with tab1:
         st.header("Single Set Analysis")
-        target_set = st.selectbox("Select Set", list(parts.keys()))
-        n_factors = st.number_input("Number of Factors", 1, 7, 3)
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            target_set = st.selectbox("Select Set", list(parts.keys()))
+        with c2:
+            n_factors = st.number_input("Number of Factors", 1, 7, 3)
+        with c3:
+            corr_method = st.selectbox("Correlation Method", ["pearson", "spearman"], index=1, help="Spearman is recommended for Likert scales.")
         
         if target_set:
             df = parts[target_set]
-            engine = QEngine(df, n_factors=n_factors).fit()
+            engine = QEngine(df, n_factors=n_factors, corr_method=corr_method).fit()
             
             st.info(f"Top 5 Eigenvalues: {np.round(engine.eigenvalues[:5], 2)}")
-            st.caption("고유값(Eigenvalue)이 1.0 미만이면 해당 요인은 통계적으로 의미가 약할 수 있습니다.")
-
+            
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("Explained Variance")
@@ -351,9 +378,13 @@ if uploaded_file:
             st.warning(f"Not enough common 'C' columns found. Found: {common_cols}")
         else:
             st.info(f"Analyzing using {len(common_cols)} common items: {common_cols[0]} ... {common_cols[-1]}")
-            n_factors_cross = st.slider("Factors to Compare", 2, 5, 3, key='cross_k')
-            
-            results = calculate_cross_set_congruence(parts, common_cols, n_factors_cross)
+            c1, c2 = st.columns(2)
+            with c1:
+                n_factors_cross = st.slider("Factors to Compare", 2, 5, 3, key='cross_k')
+            with c2:
+                corr_method_cross = st.selectbox("Correlation Method (Cross)", ["pearson", "spearman"], index=1, key='cross_c')
+
+            results = calculate_cross_set_congruence(parts, common_cols, n_factors_cross, corr_method=corr_method_cross)
             
             for res in results:
                 st.subheader(f"Congruence: {res['Pair']}")
@@ -366,13 +397,19 @@ if uploaded_file:
     # --- Tab 3: Bootstrap Stability ---
     with tab3:
         st.header("Bootstrap Stability Test")
-        target_bs = st.selectbox("Set for Bootstrap", list(parts.keys()), key='bs_set')
-        n_boot = st.number_input("Bootstrap Iterations", 50, 1000, 100)
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            target_bs = st.selectbox("Set for Bootstrap", list(parts.keys()), key='bs_set')
+        with c2:
+            n_boot = st.number_input("Bootstrap Iterations", 50, 1000, 100)
+        with c3:
+            corr_method_bs = st.selectbox("Correlation Method (Boot)", ["pearson", "spearman"], index=1, key='bs_c')
         
         if st.button("Run Bootstrap"):
             with st.spinner("Resampling people and comparing factor arrays..."):
                 # Use all items for internal stability
-                res = bootstrap_stability(parts[target_bs].values, n_factors=3, n_boot=n_boot)
+                res = bootstrap_stability(parts[target_bs].values, n_factors=3, n_boot=n_boot, corr_method=corr_method_bs)
             
             st.success("Analysis Complete")
             

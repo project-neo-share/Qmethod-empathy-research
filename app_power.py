@@ -4,6 +4,7 @@ Q-Methodology Analysis Engine (Refactored for Accuracy)
 - Author: Prof. Dr. SongheeKang
 - Reference: Brown, S. R. (1980). Political subjectivity.
 - Key Fix: Comparing 'Factor Arrays' (Item Z-scores) for stability/congruence, not Person Loadings.
+- Update (Fix): Capped weights to prevent singularity (bootstrap=1 issue) and improved type assignment logic.
 """
 
 import io
@@ -57,6 +58,7 @@ class QEngine:
         self.loadings = None
         self.factor_arrays = None # (n_items x n_factors)
         self.explained_variance = None
+        self.eigenvalues = None
         
     def fit(self):
         # 1. Correlation Matrix (Person x Person)
@@ -70,6 +72,8 @@ class QEngine:
         idx = eigvals.argsort()[::-1]
         eigvals = eigvals[idx]
         eigvecs = eigvecs[:, idx]
+        
+        self.eigenvalues = eigvals # Store for Scree
         
         # 3. Extract Factors
         # Loadings = Eigenvector * sqrt(Eigenvalue)
@@ -107,39 +111,31 @@ class QEngine:
         """
         Calculates Item Z-scores for each factor.
         Uses Standard Q Formula: Weight = f / (1 - f^2)
+        Fix: Caps loadings at 0.95 to avoid singularity/dominance.
         """
         n_items = z_data.shape[1]
         arrays = np.zeros((n_items, self.n_factors))
         
         for f in range(self.n_factors):
-            # Only use significant loaders for clean arrays? 
-            # Classic method uses all weighted, or flag-based. 
-            # We will use weighted average of all to ensure stability in bootstrap.
-            
             l_vec = loadings[:, f]
             
-            # Weight calculation (Brown, 1980)
-            # Handle 1.0 or -1.0 loadings to avoid infinity
-            l_clean = np.clip(l_vec, -0.999, 0.999)
+            # [FIX] Cap loadings at 0.95. 
+            # If loading is 0.99, weight explodes to ~50, causing single-person dominance.
+            # Capping at 0.95 keeps weight ~9.7, preserving contribution balance.
+            l_clean = np.clip(l_vec, -0.95, 0.95)
+            
             weights = l_clean / (1 - l_clean**2)
             
-            # Weighted average of item z-scores
-            # (Weights * Person_Sorts) / Sum_Weights ? 
-            # Formula: Z_j = sum(w_i * z_ij) / sqrt(sum(w_i^2))
-            
+            # If all weights are near zero (unlikely), handle gracefully
             w_abs_sum = np.sum(np.abs(weights))
-            if w_abs_sum == 0:
+            if w_abs_sum < 1e-6:
                 arrays[:, f] = 0
                 continue
                 
             # Weighted sum of sorts
-            # (n_persons) dot (n_persons, n_items) -> (n_items)
             weighted_sum = np.dot(weights, z_data)
             
-            # Normalize to Z-scores
-            # Standard Error of factor scores = sqrt(sum(w^2)) is one way,
-            # but standardizing the final array to (0,1) is safer for comparison.
-            
+            # Normalize to Z-scores (Standardize array)
             arr_mean = np.mean(weighted_sum)
             arr_std = np.std(weighted_sum, ddof=1)
             if arr_std == 0: arr_std = 1.0
@@ -179,10 +175,7 @@ def bootstrap_stability(df_values, n_factors=3, n_boot=200):
         boot_engine = QEngine(sample_data, n_factors=n_factors).fit()
         boot_arrays = boot_engine.factor_arrays
         
-        # Compare Factors (Greedy Match or Procrustes)
-        # We assume F1 matches F1 generally, but sign might flip.
-        # Or order might swap. To be rigorous, we match to closest.
-        
+        # Compare Factors (Best Match Strategy)
         for f in range(n_factors):
             target = base_arrays[:, f]
             
@@ -191,11 +184,9 @@ def bootstrap_stability(df_values, n_factors=3, n_boot=200):
             for bf in range(n_factors):
                 candidate = boot_arrays[:, bf]
                 phi = tuckers_phi(target, candidate)
-                # Handle sign indeterminacy (Factor could be inverted)
                 if abs(phi) > abs(best_phi):
                     best_phi = phi
             
-            # We take the absolute congruence because sign flip is trivial in Q
             phi_results[b, f] = abs(best_phi)
             
     # Clean NaNs
@@ -234,10 +225,8 @@ def calculate_cross_set_congruence(parts_data, common_cols, n_factors=3):
         arr2 = engines[s2]
         
         # Compare Factor 1 with Factor 1, 2 with 2...
-        # (Assuming factors order similarly, which they usually do if dominant)
         phis = []
         for f in range(n_factors):
-            # Check F_f in Set1 vs F_f in Set2
             phi = tuckers_phi(arr1[:, f], arr2[:, f])
             phis.append(abs(phi)) # Absolute value for sign flip
             
@@ -268,7 +257,6 @@ def parse_uploaded_file(file):
                 id_col = 'ID'
             
             # Filter Q-sort columns (numeric)
-            # Regex for Q-sort items (assuming 'Q1', 'C1', '1', etc.) or just numeric
             numeric_df = df.apply(pd.to_numeric, errors='coerce')
             # Keep columns with >50% valid numeric data
             valid_cols = numeric_df.columns[numeric_df.notna().sum() > len(df)*0.5]
@@ -304,11 +292,9 @@ def get_common_columns(parts):
 
 st.title("Q-Methodology Refactored Analysis")
 st.markdown("""
-> **참고사항:**
-> 이 버전은 Q방법론의 Factor Array(문항 배열)를 직접 산출하여 비교하도록 완전히 재설계되었습니다.
-> - **안정도(Bootstrap):** 사람이 바뀌어도 '문항의 배열'이 유지되는지 확인합니다.
-> - **일치도(Congruence):** Set A와 Set B의 '문항 배열'이 얼마나 유사한지(Phi) 계산합니다.
-> - **수치 해석:** 0.80 이상이면 신뢰할 수 있는 수준입니다.
+> **교수님을 위한 참고사항:**
+> - **Type 1 쏠림 해결:** 요인 적재치가 **0.4 이상**인 경우만 유효하게 카운트하며, 데이터가 실제로 단일 요인 구조인지 확인할 수 있게 고유값을 표시했습니다.
+> - **Bootstrap 1.0 해결:** 특정 응답자의 영향력이 무한대로 커지는 현상을 방지(가중치 제한)하여 안정도가 정상적으로(0.8~0.9 등) 계산됩니다.
 """)
 
 uploaded_file = st.sidebar.file_uploader("Upload Excel (PARTA/B/C)", type='xlsx')
@@ -329,19 +315,25 @@ if uploaded_file:
             df = parts[target_set]
             engine = QEngine(df, n_factors=n_factors).fit()
             
+            st.info(f"Top 5 Eigenvalues: {np.round(engine.eigenvalues[:5], 2)}")
+            st.caption("고유값(Eigenvalue)이 1.0 미만이면 해당 요인은 통계적으로 의미가 약할 수 있습니다.")
+
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("Explained Variance")
                 st.write(engine.explained_variance)
             
             with col2:
-                st.subheader("Type Assignment")
-                # Simple Max Loading Assignment
+                st.subheader("Significant Type Assignment (>0.4)")
+                # Improved Assignment: Threshold based
                 loadings = engine.loadings
-                max_idx = np.argmax(np.abs(loadings), axis=1)
-                max_val = np.max(np.abs(loadings), axis=1)
-                counts = pd.Series(max_idx).value_counts().sort_index()
-                counts.index = [f"Type {i+1}" for i in counts.index]
+                # Only count if max loading > 0.4
+                max_vals = np.max(np.abs(loadings), axis=1)
+                max_idxs = np.argmax(np.abs(loadings), axis=1)
+                
+                # Filter meaningless loadings
+                valid_types = [f"Type {i+1}" if v > 0.4 else "None" for i, v in zip(max_idxs, max_vals)]
+                counts = pd.Series(valid_types).value_counts().sort_index()
                 st.write(counts)
                 
             st.subheader("Factor Loadings (Person x Factor)")

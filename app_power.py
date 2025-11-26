@@ -449,7 +449,7 @@ if uploaded_file:
             with col1:
                 st.subheader("Explained Variance")
                 st.write(engine.explained_variance)
-           with col2:
+            with col2:
                 st.subheader("Significant Types (>0.4)")
                 # Improved Assignment: Threshold based
                 loadings = engine.loadings

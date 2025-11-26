@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="Q-Method (TADT Research) Analyzer", layout="wide")
 st.title("Q-Method (TADT Research) Analyzer")
 
-DATA_PATH = "responses_tadt.csv"   # 로컬 CSV 경로
+DATA_PATH = "responses_power1.csv"   # 로컬 CSV 경로
 MIN_N_FOR_ANALYSIS = 5
 TOPK_STATEMENTS = 5
 EPS = 1e-8
@@ -52,7 +52,7 @@ def _get_secret(path, default=""):
 GH_TOKEN   = _get_secret("github.token")
 GH_REPO    = _get_secret("github.repo")
 GH_BRANCH  = _get_secret("github.branch", "main")
-GH_REMOTEP = _get_secret("github.data_path", "responses_power.csv")  # 원격 저장 경로
+GH_REMOTEP = _get_secret("github.data_path", "responses_power1.csv")  # 원격 저장 경로
 GH_README  = _get_secret("github.readme_path", "README.md")         # (옵션)
 
 # -----------------------------
